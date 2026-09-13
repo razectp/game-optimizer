@@ -9,35 +9,38 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, RichText, Sense,
-    Stroke, Vec2,
+    Stroke, Vec2, ViewportCommand,
 };
 use eframe::{App, Frame, NativeOptions};
 use image::{ImageBuffer, Rgba};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::autostart;
+use crate::cache::{self, CacheCleanReport};
 use crate::config::AppConfig;
 use crate::optimize::{optimize_system, OptimizeReport, OptimizeRequest};
 use crate::report::format_mib;
+use crate::win_window;
 
-/// Warm amber — primary actions / brand energy.
-const ACCENT: Color32 = Color32::from_rgb(232, 168, 56);
-const ACCENT_SOFT: Color32 = Color32::from_rgb(64, 48, 22);
-/// Calm sage for “all good” status.
-const OK: Color32 = Color32::from_rgb(110, 186, 140);
-const BG: Color32 = Color32::from_rgb(22, 24, 28);
-const BG_RAISED: Color32 = Color32::from_rgb(32, 35, 41);
-const BG_ROW: Color32 = Color32::from_rgb(40, 44, 52);
-const STROKE: Color32 = Color32::from_rgb(58, 62, 72);
-const TEXT: Color32 = Color32::from_rgb(240, 236, 228);
-const MUTED: Color32 = Color32::from_rgb(148, 152, 160);
-const WARN: Color32 = Color32::from_rgb(220, 140, 70);
+/// Warm amber — primary actions.
+const ACCENT: Color32 = Color32::from_rgb(240, 176, 72);
+const ACCENT_SOFT: Color32 = Color32::from_rgb(72, 52, 24);
+const OK: Color32 = Color32::from_rgb(120, 186, 140);
+const BG: Color32 = Color32::from_rgb(28, 26, 24);
+const BG_RAISED: Color32 = Color32::from_rgb(42, 38, 34);
+const BG_ROW: Color32 = Color32::from_rgb(54, 48, 42);
+const STROKE: Color32 = Color32::from_rgb(72, 64, 56);
+const TEXT: Color32 = Color32::from_rgb(250, 246, 238);
+const MUTED: Color32 = Color32::from_rgb(168, 158, 146);
+const WARN: Color32 = Color32::from_rgb(220, 150, 80);
 
 enum WorkerMsg {
     Report(OptimizeReport),
-    Log(String),
+    Status(String),
     Watching(bool),
+    Cache(CacheCleanReport),
+    Busy(bool),
 }
 
 enum UiCmd {
@@ -45,6 +48,13 @@ enum UiCmd {
     Scan,
     StartWatch { interval: u64, trim_game: bool },
     StopWatch,
+    CleanCache,
+}
+
+struct TraySignals {
+    show: AtomicBool,
+    optimize: AtomicBool,
+    quit: AtomicBool,
 }
 
 /// Launch the native GUI (blocks until quit).
@@ -52,8 +62,8 @@ pub fn run(config_path: PathBuf) -> eframe::Result<()> {
     let icon = tray_rgba_icon();
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([720.0, 460.0])
-            .with_min_inner_size([640.0, 400.0])
+            .with_inner_size([760.0, 520.0])
+            .with_min_inner_size([680.0, 460.0])
             .with_title("Game Optimizer")
             .with_icon(eframe_icon()),
         ..Default::default()
@@ -72,7 +82,6 @@ pub fn run(config_path: PathBuf) -> eframe::Result<()> {
 
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    // Prefer Windows Segoe UI for a friendlier native feel.
     let candidates = [
         r"C:\Windows\Fonts\segoeui.ttf",
         r"C:\Windows\Fonts\calibri.ttf",
@@ -99,39 +108,55 @@ fn style_visuals(ctx: &egui::Context) {
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, STROKE);
     visuals.widgets.inactive.bg_fill = BG_ROW;
     visuals.widgets.inactive.weak_bg_fill = BG_RAISED;
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(52, 56, 66);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(68, 60, 52);
     visuals.widgets.active.bg_fill = ACCENT_SOFT;
     visuals.selection.bg_fill = ACCENT_SOFT;
     visuals.extreme_bg_color = BG_RAISED;
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(6);
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(6);
-    visuals.widgets.active.corner_radius = CornerRadius::same(6);
+    visuals.widgets.inactive.corner_radius = CornerRadius::same(10);
+    visuals.widgets.hovered.corner_radius = CornerRadius::same(10);
+    visuals.widgets.active.corner_radius = CornerRadius::same(10);
     ctx.set_visuals(visuals);
 
     ctx.style_mut_of(egui::Theme::Dark, |style| {
-        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-        style.spacing.button_padding = Vec2::new(12.0, 6.0);
+        style.spacing.item_spacing = Vec2::new(10.0, 8.0);
+        style.spacing.button_padding = Vec2::new(14.0, 8.0);
         style.spacing.window_margin = egui::Margin::same(0);
         style.spacing.indent = 12.0;
     });
 }
 
+fn brand_icon_rgba(size: u32) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    let cx = size as f32 / 2.0 - 0.5;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cx;
+            let r = (dx * dx + dy * dy).sqrt();
+            let outer = size as f32 / 2.0;
+            let inner = outer - 2.0;
+            if r < inner - 4.0 {
+                rgba.extend_from_slice(&[240, 176, 72, 255]);
+            } else if r < inner {
+                rgba.extend_from_slice(&[28, 26, 24, 255]);
+            } else if r < outer {
+                rgba.extend_from_slice(&[240, 176, 72, 80]);
+            } else {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+    }
+    rgba
+}
+
 fn tray_rgba_icon() -> Icon {
     let size = 32u32;
     let mut img = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(size, size);
+    let raw = brand_icon_rgba(size);
     for y in 0..size {
         for x in 0..size {
-            let dx = x as f32 - 15.5;
-            let dy = y as f32 - 15.5;
-            let r = (dx * dx + dy * dy).sqrt();
-            let pixel = if r < 14.0 {
-                Rgba([232, 168, 56, 255])
-            } else if r < 16.0 {
-                Rgba([22, 24, 28, 255])
-            } else {
-                Rgba([0, 0, 0, 0])
-            };
-            img.put_pixel(x, y, pixel);
+            let i = ((y * size + x) * 4) as usize;
+            img.put_pixel(x, y, Rgba([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]));
         }
     }
     Icon::from_rgba(img.into_raw(), size, size).expect("tray icon")
@@ -139,57 +164,34 @@ fn tray_rgba_icon() -> Icon {
 
 fn eframe_icon() -> egui::IconData {
     let size = 32u32;
-    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - 15.5;
-            let dy = y as f32 - 15.5;
-            let r = (dx * dx + dy * dy).sqrt();
-            if r < 14.0 {
-                rgba.extend_from_slice(&[232, 168, 56, 255]);
-            } else if r < 16.0 {
-                rgba.extend_from_slice(&[22, 24, 28, 255]);
-            } else {
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
-            }
-        }
-    }
     egui::IconData {
-        rgba,
+        rgba: brand_icon_rgba(size),
         width: size,
         height: size,
     }
 }
 
-fn paint_bg(ui: &egui::Ui) {
-    let rect = ui.max_rect();
-    let painter = ui.painter();
-    painter.rect_filled(rect, 0.0, BG);
-    // Soft warm glow top-left (atmosphere without flat fill).
-    let glow = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * 0.55, 120.0));
-    painter.rect_filled(glow, 0.0, Color32::from_rgba_unmultiplied(232, 168, 56, 18));
-}
-
 struct GuiApp {
-    config_path: PathBuf,
     report: Option<OptimizeReport>,
-    logs: Vec<String>,
+    status: String,
     watching: bool,
     watch_interval: u64,
     trim_game_memory: bool,
     autostart: bool,
-    start_minimized_hint: bool,
-    /// Must stay owned so the tray icon is not destroyed.
+    busy: bool,
+    in_tray: bool,
+    restore_maximized: bool,
+    cache_armed: bool,
+    tray_pump_started: bool,
     #[allow(dead_code)]
     tray: Option<TrayIcon>,
     tray_show: MenuItem,
     tray_optimize: MenuItem,
     tray_quit: MenuItem,
+    tray_signals: Arc<TraySignals>,
     ui_tx: Sender<UiCmd>,
     worker_rx: Receiver<WorkerMsg>,
     watch_flag: Arc<AtomicBool>,
-    last_pulse: Instant,
-    started: Instant,
 }
 
 impl GuiApp {
@@ -225,34 +227,72 @@ impl GuiApp {
         );
 
         let app = Self {
-            config_path,
             report: None,
-            logs: vec!["Pronto. O X ou Minimizar enviam para a bandeja.".into()],
+            status: "Pronto para otimizar seus jogos.".into(),
             watching: false,
             watch_interval: 45,
             trim_game_memory: false,
             autostart,
-            start_minimized_hint: false,
+            busy: false,
+            in_tray: false,
+            restore_maximized: false,
+            cache_armed: false,
+            tray_pump_started: false,
             tray,
             tray_show,
             tray_optimize,
             tray_quit,
+            tray_signals: Arc::new(TraySignals {
+                show: AtomicBool::new(false),
+                optimize: AtomicBool::new(false),
+                quit: AtomicBool::new(false),
+            }),
             ui_tx,
             worker_rx,
             watch_flag,
-            last_pulse: Instant::now(),
-            started: Instant::now(),
         };
         let _ = app.ui_tx.send(UiCmd::Scan);
         app
     }
 
-    fn push_log(&mut self, line: impl AsRef<str>) {
-        self.logs.push(line.as_ref().to_owned());
-        if self.logs.len() > 80 {
-            let drain = self.logs.len() - 80;
-            self.logs.drain(0..drain);
+    fn snapshot_maximized(&mut self, ctx: &egui::Context) {
+        if let Some(maximized) = ctx.input(|i| i.viewport().maximized) {
+            self.restore_maximized = maximized;
+        } else if let Some(maximized) = win_window::is_main_window_maximized() {
+            self.restore_maximized = maximized;
         }
+    }
+
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        self.snapshot_maximized(ctx);
+        self.in_tray = true;
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+    }
+
+    fn restore_from_tray(&mut self, ctx: &egui::Context) {
+        self.in_tray = false;
+        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(ViewportCommand::Maximized(self.restore_maximized));
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+        let _ = win_window::restore_main_window(self.restore_maximized);
+        ctx.request_repaint();
+    }
+
+    fn ensure_tray_pump(&mut self, ctx: &egui::Context) {
+        if self.tray_pump_started {
+            return;
+        }
+        self.tray_pump_started = true;
+        spawn_tray_pump(
+            ctx.clone(),
+            Arc::clone(&self.tray_signals),
+            self.tray_show.id().clone(),
+            self.tray_optimize.id().clone(),
+            self.tray_quit.id().clone(),
+        );
     }
 
     fn poll_worker(&mut self) {
@@ -261,32 +301,36 @@ impl GuiApp {
                 WorkerMsg::Report(report) => {
                     self.report = Some(report);
                 }
-                WorkerMsg::Log(line) => self.push_log(line),
+                WorkerMsg::Status(line) => self.status = line,
                 WorkerMsg::Watching(active) => {
                     self.watching = active;
+                    self.status = if active {
+                        "Cuidando dos jogos em segundo plano.".into()
+                    } else {
+                        "Pausado. Toque em Otimizar quando quiser.".into()
+                    };
                 }
+                WorkerMsg::Cache(report) => {
+                    self.status = report.friendly_summary();
+                    self.cache_armed = false;
+                }
+                WorkerMsg::Busy(busy) => self.busy = busy,
             }
         }
     }
 
-    fn poll_tray(&mut self, ctx: &egui::Context) {
-        if let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == self.tray_show.id() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            } else if event.id == self.tray_optimize.id() {
-                let _ = self.ui_tx.send(UiCmd::Optimize {
-                    trim_game: self.trim_game_memory,
-                });
-            } else if event.id == self.tray_quit.id() {
-                self.watch_flag.store(false, Ordering::SeqCst);
-                std::process::exit(0);
-            }
+    fn poll_tray_signals(&mut self, ctx: &egui::Context) {
+        if self.tray_signals.show.swap(false, Ordering::SeqCst) {
+            self.restore_from_tray(ctx);
         }
-
-        if let Ok(TrayIconEvent::DoubleClick { .. }) = TrayIconEvent::receiver().try_recv() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        if self.tray_signals.optimize.swap(false, Ordering::SeqCst) {
+            let _ = self.ui_tx.send(UiCmd::Optimize {
+                trim_game: self.trim_game_memory,
+            });
+        }
+        if self.tray_signals.quit.swap(false, Ordering::SeqCst) {
+            self.watch_flag.store(false, Ordering::SeqCst);
+            std::process::exit(0);
         }
     }
 
@@ -304,38 +348,37 @@ impl GuiApp {
 
 impl App for GuiApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        self.ensure_tray_pump(ctx);
         self.poll_worker();
-        self.poll_tray(ctx);
+        self.poll_tray_signals(ctx);
 
         let close_requested = ctx.input(|i| i.viewport().close_requested());
         if close_requested {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            if !self.start_minimized_hint {
-                self.push_log("Na bandeja. Clique duplo no ícone para reabrir.");
-                self.start_minimized_hint = true;
-            }
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.hide_to_tray(ctx);
         }
 
-        if self.last_pulse.elapsed() > Duration::from_millis(250) {
-            ctx.request_repaint();
-            self.last_pulse = Instant::now();
-        }
+        // Keep the event loop alive while hidden so tray clicks restore.
+        ctx.request_repaint_after(Duration::from_millis(200));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut Frame) {
         let ctx = ui.ctx().clone();
-        paint_bg(ui);
+        let rect = ui.max_rect();
+        ui.painter().rect_filled(rect, 0.0, BG);
+        let glow = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * 0.6, 140.0));
+        ui.painter()
+            .rect_filled(glow, 0.0, Color32::from_rgba_unmultiplied(240, 176, 72, 16));
 
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(Color32::TRANSPARENT)
-                    .inner_margin(egui::Margin::symmetric(16, 12)),
+                    .inner_margin(egui::Margin::symmetric(20, 16)),
             )
             .show(ui, |ui| {
                 self.draw_header(ui, &ctx);
-                ui.add_space(10.0);
+                ui.add_space(14.0);
                 self.draw_body(ui, &ctx);
             });
     }
@@ -343,22 +386,13 @@ impl App for GuiApp {
 
 impl GuiApp {
     fn draw_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let pulse = ((self.started.elapsed().as_secs_f32() * 1.6).sin() + 1.0) * 0.5;
-        let brand_glow = Color32::from_rgba_unmultiplied(
-            ACCENT.r(),
-            ACCENT.g(),
-            ACCENT.b(),
-            40 + (pulse * 50.0) as u8,
-        );
-
         ui.horizontal(|ui| {
-            // Brand mark
-            let mark = ui.allocate_response(Vec2::splat(28.0), Sense::hover());
+            let mark = ui.allocate_response(Vec2::splat(32.0), Sense::hover());
             ui.painter()
-                .circle_filled(mark.rect.center(), 11.0, brand_glow);
-            ui.painter().circle_filled(mark.rect.center(), 7.5, ACCENT);
+                .circle_filled(mark.rect.center(), 13.0, ACCENT_SOFT);
+            ui.painter().circle_filled(mark.rect.center(), 8.0, ACCENT);
 
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             ui.vertical(|ui| {
                 ui.label(
                     RichText::new("Game Optimizer")
@@ -367,22 +401,24 @@ impl GuiApp {
                         .strong(),
                 );
                 ui.label(
-                    RichText::new("Jogos abertos · sem fechar nada")
+                    RichText::new("Seus jogos, mais fluidos — nada é fechado.")
                         .color(MUTED)
-                        .size(12.0),
+                        .size(13.0),
                 );
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let primary = ui.add_sized(
-                    [148.0, 34.0],
+                let primary = ui.add_enabled(
+                    !self.busy,
                     egui::Button::new(
                         RichText::new("Otimizar")
                             .strong()
-                            .color(Color32::from_rgb(28, 22, 12)),
+                            .size(15.0)
+                            .color(Color32::from_rgb(32, 24, 12)),
                     )
                     .fill(ACCENT)
-                    .corner_radius(8.0),
+                    .corner_radius(10.0)
+                    .min_size(Vec2::new(132.0, 38.0)),
                 );
                 if primary.clicked() {
                     let _ = self.ui_tx.send(UiCmd::Optimize {
@@ -392,33 +428,28 @@ impl GuiApp {
 
                 ui.add_space(8.0);
                 status_chip(ui, self.watching);
-
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new("Bandeja").color(MUTED).size(12.0))
-                            .fill(BG_RAISED)
-                            .corner_radius(6.0),
-                    )
-                    .on_hover_text("Minimizar para a bandeja do sistema")
-                    .clicked()
-                {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
             });
         });
 
-        ui.add_space(8.0);
-        // Compact stats strip — fills the “empty” feel with useful density.
+        ui.add_space(12.0);
         ui.horizontal(|ui| {
-            metric_pill(ui, "Jogos", &self.game_count().to_string(), ACCENT);
-            metric_pill(ui, "RAM livre", &self.reclaim_count().to_string(), OK);
-            metric_pill(
-                ui,
-                "Vigilância",
-                &format!("{}s", self.watch_interval),
-                MUTED,
-            );
+            metric_pill(ui, "Jogos abertos", &self.game_count().to_string(), ACCENT);
+            metric_pill(ui, "RAM extra", &self.reclaim_count().to_string(), OK);
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Minimizar").color(MUTED).size(12.0))
+                        .fill(BG_RAISED)
+                        .corner_radius(8.0),
+                )
+                .on_hover_text("Envia para a bandeja do sistema")
+                .clicked()
+            {
+                self.hide_to_tray(ctx);
+            }
         });
+
+        ui.add_space(8.0);
+        ui.label(RichText::new(&self.status).color(MUTED).size(13.0));
     }
 
     fn draw_body(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
@@ -426,19 +457,18 @@ impl GuiApp {
         ui.horizontal(|ui| {
             ui.set_min_height(available);
 
-            // Main column ~68%
             ui.vertical(|ui| {
-                ui.set_width(ui.available_width() * 0.68 - 6.0);
+                ui.set_width(ui.available_width() * 0.64 - 8.0);
                 ui.set_min_height(available);
 
-                section_label(ui, "Jogos detectados");
+                section_label(ui, "Seus jogos");
                 egui::Frame::new()
                     .fill(BG_RAISED)
                     .stroke(Stroke::new(1.0, STROKE))
-                    .corner_radius(10.0)
-                    .inner_margin(10.0)
+                    .corner_radius(14.0)
+                    .inner_margin(12.0)
                     .show(ui, |ui| {
-                        let list_h = (available * 0.42).clamp(88.0, 160.0);
+                        let list_h = (available - 24.0).max(180.0);
                         egui::ScrollArea::vertical()
                             .max_height(list_h)
                             .auto_shrink([false; 2])
@@ -446,33 +476,10 @@ impl GuiApp {
                                 self.draw_games(ui);
                             });
                     });
-
-                ui.add_space(8.0);
-                section_label(ui, "Atividade");
-                egui::Frame::new()
-                    .fill(BG_RAISED)
-                    .stroke(Stroke::new(1.0, STROKE))
-                    .corner_radius(10.0)
-                    .inner_margin(8.0)
-                    .show(ui, |ui| {
-                        // Fill remaining height so no dead zone.
-                        let rest = ui.available_height().max(72.0);
-                        egui::ScrollArea::vertical()
-                            .max_height(rest)
-                            .auto_shrink([false; 2])
-                            .stick_to_bottom(true)
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                for line in self.logs.iter().rev().take(40).rev() {
-                                    ui.label(RichText::new(line).color(MUTED).size(12.0));
-                                }
-                            });
-                    });
             });
 
-            ui.add_space(10.0);
+            ui.add_space(14.0);
 
-            // Side column
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
                 ui.set_min_height(available);
@@ -481,43 +488,42 @@ impl GuiApp {
                 egui::Frame::new()
                     .fill(BG_RAISED)
                     .stroke(Stroke::new(1.0, STROKE))
-                    .corner_radius(10.0)
-                    .inner_margin(10.0)
+                    .corner_radius(14.0)
+                    .inner_margin(12.0)
                     .show(ui, |ui| {
+                        let wide = ui.available_width();
                         if ui
-                            .add_sized(
-                                [ui.available_width(), 32.0],
-                                egui::Button::new(RichText::new("Atualizar").color(TEXT))
+                            .add_enabled(
+                                !self.busy,
+                                egui::Button::new(RichText::new("Atualizar lista").color(TEXT))
                                     .fill(BG_ROW)
-                                    .corner_radius(7.0),
+                                    .corner_radius(9.0)
+                                    .min_size(Vec2::new(wide, 34.0)),
                             )
                             .clicked()
                         {
                             let _ = self.ui_tx.send(UiCmd::Scan);
                         }
-                        ui.add_space(4.0);
+                        ui.add_space(6.0);
                         if self.watching {
                             if ui
                                 .add_sized(
-                                    [ui.available_width(), 32.0],
-                                    egui::Button::new(
-                                        RichText::new("Parar vigilância").color(TEXT),
-                                    )
-                                    .fill(Color32::from_rgb(72, 42, 36))
-                                    .corner_radius(7.0),
+                                    [wide, 34.0],
+                                    egui::Button::new(RichText::new("Parar por agora").color(TEXT))
+                                        .fill(Color32::from_rgb(78, 44, 36))
+                                        .corner_radius(9.0),
                                 )
                                 .clicked()
                             {
                                 let _ = self.ui_tx.send(UiCmd::StopWatch);
                             }
                         } else if ui
-                            .add_sized(
-                                [ui.available_width(), 32.0],
-                                egui::Button::new(
-                                    RichText::new("Vigiar automaticamente").color(TEXT),
-                                )
-                                .fill(BG_ROW)
-                                .corner_radius(7.0),
+                            .add_enabled(
+                                !self.busy,
+                                egui::Button::new(RichText::new("Manter otimizado").color(TEXT))
+                                    .fill(BG_ROW)
+                                    .corner_radius(9.0)
+                                    .min_size(Vec2::new(wide, 34.0)),
                             )
                             .clicked()
                         {
@@ -528,61 +534,115 @@ impl GuiApp {
                         }
                     });
 
-                ui.add_space(8.0);
-                section_label(ui, "Ajustes");
+                ui.add_space(12.0);
+                section_label(ui, "Opções");
                 egui::Frame::new()
                     .fill(BG_RAISED)
                     .stroke(Stroke::new(1.0, STROKE))
-                    .corner_radius(10.0)
-                    .inner_margin(10.0)
+                    .corner_radius(14.0)
+                    .inner_margin(12.0)
                     .show(ui, |ui| {
                         if ui
                             .checkbox(
                                 &mut self.autostart,
                                 RichText::new("Iniciar com o Windows")
                                     .color(TEXT)
-                                    .size(13.0),
+                                    .size(13.5),
                             )
                             .changed()
                         {
                             match autostart::set_enabled(self.autostart) {
-                                Ok(()) => self.push_log(if self.autostart {
-                                    "Inicialização automática ativada."
-                                } else {
-                                    "Inicialização automática desativada."
-                                }),
-                                Err(err) => self.push_log(format!("Auto-start: {err}")),
+                                Ok(()) => {
+                                    self.status = if self.autostart {
+                                        "Vai abrir junto com o Windows.".into()
+                                    } else {
+                                        "Não abre mais automaticamente.".into()
+                                    };
+                                }
+                                Err(err) => {
+                                    self.status =
+                                        format!("Não foi possível alterar o início: {err}");
+                                }
                             }
                         }
 
+                        ui.add_space(4.0);
                         ui.checkbox(
                             &mut self.trim_game_memory,
-                            RichText::new("Trim memória do jogo").color(TEXT).size(13.0),
+                            RichText::new("Liberar RAM do jogo").color(TEXT).size(13.5),
                         );
                         ui.label(
-                            RichText::new("Pode engasgar brevemente ao paginar.")
-                                .color(WARN)
-                                .size(11.0),
+                            RichText::new(
+                                "Pode dar uma travadinha. Deixe desligado se não tiver certeza.",
+                            )
+                            .color(WARN)
+                            .size(11.5),
                         );
 
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new("Intervalo (segundos)")
-                                .color(MUTED)
-                                .size(12.0),
-                        );
-                        ui.add(
-                            egui::Slider::new(&mut self.watch_interval, 15..=120)
-                                .clamping(egui::SliderClamping::Always),
-                        );
+                        if self.watching {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("Checar a cada (segundos)")
+                                    .color(MUTED)
+                                    .size(12.0),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut self.watch_interval, 15..=120)
+                                    .clamping(egui::SliderClamping::Always),
+                            );
+                        }
 
-                        ui.add_space(8.0);
+                        ui.add_space(10.0);
                         ui.label(
-                            RichText::new(self.config_path.display().to_string())
-                                .color(MUTED)
-                                .size(10.0)
-                                .monospace(),
+                            RichText::new(
+                                "Limpar pasta Temp do Windows. Não apaga cache de jogos.",
+                            )
+                            .color(MUTED)
+                            .size(11.5),
                         );
+                        ui.add_space(4.0);
+                        let cache_label = if self.cache_armed {
+                            "Confirmar limpeza"
+                        } else {
+                            "Limpar arquivos temporários"
+                        };
+                        let cache_fill = if self.cache_armed {
+                            Color32::from_rgb(96, 56, 32)
+                        } else {
+                            BG_ROW
+                        };
+                        if ui
+                            .add_enabled(
+                                !self.busy,
+                                egui::Button::new(RichText::new(cache_label).color(TEXT))
+                                    .fill(cache_fill)
+                                    .corner_radius(9.0)
+                                    .min_size(Vec2::new(ui.available_width(), 34.0)),
+                            )
+                            .clicked()
+                        {
+                            if self.cache_armed {
+                                let _ = self.ui_tx.send(UiCmd::CleanCache);
+                                self.status = "Limpando arquivos temporários…".into();
+                            } else {
+                                self.cache_armed = true;
+                                self.status =
+                                    "Toque de novo para confirmar a limpeza da pasta Temp.".into();
+                            }
+                        }
+                        if self.cache_armed
+                            && ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Cancelar").color(MUTED).size(12.0),
+                                    )
+                                    .fill(Color32::TRANSPARENT),
+                                )
+                                .clicked()
+                        {
+                            self.cache_armed = false;
+                            self.status = "Limpeza cancelada.".into();
+                        }
                     });
             });
         });
@@ -590,25 +650,39 @@ impl GuiApp {
 
     fn draw_games(&self, ui: &mut egui::Ui) {
         let Some(report) = &self.report else {
-            ui.label(RichText::new("Carregando…").color(MUTED));
+            ui.label(
+                RichText::new("Procurando jogos abertos…")
+                    .color(MUTED)
+                    .size(14.0),
+            );
             return;
         };
 
         if report.games.is_empty() {
+            ui.add_space(12.0);
             ui.label(
-                RichText::new("Nenhum jogo aberto. Inicie um jogo e toque em Atualizar.")
-                    .color(MUTED)
-                    .size(13.0),
+                RichText::new("Nenhum jogo aberto agora")
+                    .color(TEXT)
+                    .size(16.0)
+                    .strong(),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "Inicie um jogo e toque em Atualizar lista. O otimizador não fecha nada.",
+                )
+                .color(MUTED)
+                .size(13.0),
             );
         } else {
             for game in &report.games {
                 egui::Frame::new()
                     .fill(BG_ROW)
-                    .corner_radius(8.0)
-                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .corner_radius(10.0)
+                    .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&game.name).color(TEXT).strong().size(14.0));
+                            ui.label(RichText::new(&game.name).color(TEXT).strong().size(15.0));
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -621,34 +695,28 @@ impl GuiApp {
                                 },
                             );
                         });
-                        ui.label(
-                            RichText::new(format!("PID {}", game.pid))
-                                .color(MUTED)
-                                .size(11.0)
-                                .monospace(),
-                        );
                     });
-                ui.add_space(4.0);
+                ui.add_space(6.0);
             }
         }
 
         if !report.reclaim_candidates.is_empty() {
-            ui.add_space(4.0);
+            ui.add_space(8.0);
             ui.label(
                 RichText::new(format!(
-                    "Pode liberar RAM · {} app(s)",
+                    "Pode ceder RAM · {} app(s)",
                     report.reclaim_candidates.len()
                 ))
                 .color(MUTED)
-                .size(12.0),
+                .size(12.5),
             );
             for proc in report.reclaim_candidates.iter().take(4) {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&proc.name).color(MUTED).size(12.0));
+                    ui.label(RichText::new(&proc.name).color(MUTED).size(12.5));
                     ui.label(
                         RichText::new(format_mib(proc.memory_bytes))
                             .color(MUTED)
-                            .size(12.0),
+                            .size(12.5),
                     );
                 });
             }
@@ -657,13 +725,13 @@ impl GuiApp {
 }
 
 fn section_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).color(MUTED).size(11.0).strong());
-    ui.add_space(4.0);
+    ui.label(RichText::new(text).color(MUTED).size(12.0).strong());
+    ui.add_space(6.0);
 }
 
 fn status_chip(ui: &mut egui::Ui, watching: bool) {
     let (label, color) = if watching {
-        ("Vigiando", OK)
+        ("Cuidando", OK)
     } else {
         ("Em espera", MUTED)
     };
@@ -676,12 +744,12 @@ fn status_chip(ui: &mut egui::Ui, watching: bool) {
         ))
         .stroke(Stroke::new(1.0, color.gamma_multiply(0.45)))
         .corner_radius(16.0)
-        .inner_margin(egui::Margin::symmetric(10, 5))
+        .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let dot = ui.allocate_response(Vec2::splat(8.0), Sense::hover());
                 ui.painter().circle_filled(dot.rect.center(), 3.5, color);
-                ui.label(RichText::new(label).color(color).size(12.0).strong());
+                ui.label(RichText::new(label).color(color).size(12.5).strong());
             });
         });
 }
@@ -690,14 +758,57 @@ fn metric_pill(ui: &mut egui::Ui, label: &str, value: &str, accent: Color32) {
     egui::Frame::new()
         .fill(BG_RAISED)
         .stroke(Stroke::new(1.0, STROKE))
-        .corner_radius(8.0)
-        .inner_margin(egui::Margin::symmetric(10, 6))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(label).color(MUTED).size(11.0));
-                ui.label(RichText::new(value).color(accent).strong().size(13.0));
+                ui.label(RichText::new(label).color(MUTED).size(12.0));
+                ui.label(RichText::new(value).color(accent).strong().size(14.0));
             });
         });
+}
+
+fn spawn_tray_pump(
+    ctx: egui::Context,
+    signals: Arc<TraySignals>,
+    show_id: MenuId,
+    optimize_id: MenuId,
+    quit_id: MenuId,
+) {
+    thread::spawn(move || loop {
+        let mut woke = false;
+        while let Ok(event) = MenuEvent::receiver().try_recv() {
+            woke = true;
+            if event.id == show_id {
+                signals.show.store(true, Ordering::SeqCst);
+            } else if event.id == optimize_id {
+                signals.optimize.store(true, Ordering::SeqCst);
+            } else if event.id == quit_id {
+                signals.quit.store(true, Ordering::SeqCst);
+            }
+        }
+        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            match event {
+                TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                }
+                | TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => {
+                    woke = true;
+                    signals.show.store(true, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+        if woke {
+            ctx.request_repaint();
+        }
+        thread::sleep(Duration::from_millis(80));
+    });
 }
 
 fn spawn_worker(
@@ -709,23 +820,28 @@ fn spawn_worker(
     thread::spawn(move || {
         let mut interval = 45u64;
         let mut trim_game = false;
+        let mut last_watch = Instant::now() - Duration::from_secs(10_000);
         loop {
             match ui_rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(UiCmd::Scan) => {
+                    let _ = worker_tx.send(WorkerMsg::Busy(true));
                     let config = AppConfig::load_or_default(&config_path).unwrap_or_default();
                     let report = optimize_system(&OptimizeRequest {
                         config,
                         dry_run: true,
                     });
-                    let _ = worker_tx.send(WorkerMsg::Log(format!(
-                        "Scan: {} jogo(s), {} candidato(s).",
-                        report.games.len(),
-                        report.reclaim_candidates.len()
-                    )));
+                    let status = if report.games.is_empty() {
+                        "Nenhum jogo aberto agora.".into()
+                    } else {
+                        format!("{} jogo(s) pronto(s) para otimizar.", report.games.len())
+                    };
+                    let _ = worker_tx.send(WorkerMsg::Status(status));
                     let _ = worker_tx.send(WorkerMsg::Report(report));
+                    let _ = worker_tx.send(WorkerMsg::Busy(false));
                 }
                 Ok(UiCmd::Optimize { trim_game: tg }) => {
                     trim_game = tg;
+                    let _ = worker_tx.send(WorkerMsg::Busy(true));
                     let mut config = AppConfig::load_or_default(&config_path).unwrap_or_default();
                     config.trim_game_memory = trim_game;
                     let report = optimize_system(&OptimizeRequest {
@@ -734,11 +850,18 @@ fn spawn_worker(
                     });
                     let ok = report.results.iter().filter(|r| r.ok).count();
                     let fail = report.results.iter().filter(|r| !r.ok).count();
-                    let _ = worker_tx.send(WorkerMsg::Log(format!(
-                        "Otimização: {ok} ok, {fail} falha(s), {} jogo(s).",
-                        report.games.len()
-                    )));
+                    let status = if report.games.is_empty() {
+                        "Nenhum jogo aberto para otimizar.".into()
+                    } else if fail == 0 {
+                        format!("Tudo certo — {} jogo(s) otimizado(s).", report.games.len())
+                    } else {
+                        format!(
+                            "Otimizou com avisos ({ok} ok, {fail} falha). Tente como administrador."
+                        )
+                    };
+                    let _ = worker_tx.send(WorkerMsg::Status(status));
                     let _ = worker_tx.send(WorkerMsg::Report(report));
+                    let _ = worker_tx.send(WorkerMsg::Busy(false));
                 }
                 Ok(UiCmd::StartWatch {
                     interval: secs,
@@ -747,17 +870,24 @@ fn spawn_worker(
                     interval = secs.max(15);
                     trim_game = tg;
                     watch_flag.store(true, Ordering::SeqCst);
+                    last_watch = Instant::now() - Duration::from_secs(10_000);
                     let _ = worker_tx.send(WorkerMsg::Watching(true));
-                    let _ =
-                        worker_tx.send(WorkerMsg::Log(format!("Vigilância a cada {interval}s.")));
                 }
                 Ok(UiCmd::StopWatch) => {
                     watch_flag.store(false, Ordering::SeqCst);
                     let _ = worker_tx.send(WorkerMsg::Watching(false));
-                    let _ = worker_tx.send(WorkerMsg::Log("Vigilância parada.".into()));
+                }
+                Ok(UiCmd::CleanCache) => {
+                    let _ = worker_tx.send(WorkerMsg::Busy(true));
+                    let report = cache::clean_user_caches();
+                    let _ = worker_tx.send(WorkerMsg::Cache(report));
+                    let _ = worker_tx.send(WorkerMsg::Busy(false));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if watch_flag.load(Ordering::SeqCst) {
+                    if watch_flag.load(Ordering::SeqCst)
+                        && last_watch.elapsed() >= Duration::from_secs(interval.max(15))
+                    {
+                        last_watch = Instant::now();
                         let mut config =
                             AppConfig::load_or_default(&config_path).unwrap_or_default();
                         config.trim_game_memory = trim_game;
@@ -766,7 +896,6 @@ fn spawn_worker(
                             dry_run: false,
                         });
                         let _ = worker_tx.send(WorkerMsg::Report(report));
-                        thread::sleep(Duration::from_secs(interval.max(15)));
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,

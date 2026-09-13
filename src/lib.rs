@@ -7,12 +7,14 @@
 #![deny(missing_docs)]
 
 pub mod autostart;
+pub mod cache;
 pub mod config;
 pub mod contract;
 pub mod detect;
 pub mod gui;
 pub mod optimize;
 pub mod report;
+pub mod win_window;
 
 #[cfg(windows)]
 pub mod win_process;

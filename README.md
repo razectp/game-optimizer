@@ -4,35 +4,49 @@ Windows app that applies a **Game Performance Contract** to running games.
 Never closes games. Large non-game apps (e.g. Chrome) can be trimmed to free
 RAM; editors like Cursor are left alone by default.
 
-**Default launch opens the GUI.** Closing the window minimizes to the system
-tray. Start with Windows is enabled by default (installer + first GUI run).
+**Default launch opens the GUI.** Closing or minimizing the window sends the
+app to the system tray. Click the tray icon (or *Abrir*) to restore, including
+if the window was maximized. Start with Windows is enabled by default.
 
 ## Requirements
 
 - Windows 10/11
-- Rust stable 1.85+ (to build)
 - **Administrator** recommended for full process-control rights on games
 
 ## Install (end users)
 
+No Rust toolchain is required. Use a packaged release:
+
+1. **Setup (recommended):** run `GameOptimizer-0.4.0-setup.exe` (Inno Setup).
+2. **Portable zip:** extract `GameOptimizer-0.4.0-windows.zip` and run
+   `game_optimizer.exe`, or install from the extracted folder:
+
 ```powershell
-cd game_optimizer
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+From a source checkout, after a release binary exists (or with `-Build` if you
+have Rust):
+
+```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\install.ps1
+powershell -ExecutionPolicy Bypass -File .\installer\install.ps1 -Build
 ```
 
 Installs to `%LOCALAPPDATA%\GameOptimizer`, creates Start Menu / Desktop
-shortcuts, and enables auto-start. Use `-NoAutostart` to skip the Run key.
-
-Uninstall:
+shortcuts, registers **Apps & features** uninstall, and enables auto-start.
+Use `-NoAutostart` to skip the Run key. Uninstall from Apps & features, or:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\installer\uninstall.ps1
+powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\GameOptimizer\uninstall.ps1"
 ```
+
+Maintainers can produce the zip + Inno inputs with `installer\package.ps1`,
+then `iscc installer\GameOptimizer.iss`.
 
 ## Build / run (developers)
 
 ```powershell
-cd game_optimizer
 cargo build --release
 
 # GUI (default)
@@ -50,6 +64,8 @@ cargo build --release
 .\target\release\game_optimizer.exe autostart --off
 ```
 
+Requires Rust stable 1.85+.
+
 ## What GPC does
 
 | Action | Effect |
@@ -61,6 +77,9 @@ cargo build --release
 | CPU-set / affinity partition | Split cores across multi-instance games |
 | Non-game WS trim | Reclaims Chrome/Edge/… (configurable) |
 | Trim memória do jogo | Optional empty of game working sets |
+
+The GUI can also clean the **user Temp / INetCache** folders (confirm in the
+UI). Shader caches, Prefetch, and Windows Update files are never touched.
 
 ## Adding a game
 

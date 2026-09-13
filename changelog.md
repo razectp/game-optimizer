@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0 — 2026-09-13
+
+- Release packaging: per-user PowerShell installer (no Rust required), Inno Setup
+  script, Apps & features registration, version/icon/manifest resources.
+- Friendlier Portuguese GUI: warmer layout, no activity-log noise, quieter status.
+- Tray restore keeps maximized state; native ShowWindow + event pump so the window
+  comes back after hide-to-tray.
+- Optional user Temp / INetCache cleanup (confirmed in UI). Shader caches, Prefetch,
+  and Windows Update folders are never touched.
+- Watch loop no longer blocks Stop; tray left-click restores the window.
+
 ## 0.3.0 — 2026-09-13
 
 - End-user GUI (Portuguese) opens by default; CLI remains via subcommands.

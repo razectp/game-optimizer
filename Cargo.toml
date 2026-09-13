@@ -1,11 +1,16 @@
 [package]
 name = "game_optimizer"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Windows game performance optimizer with GUI, tray, and installer"
 license = "MIT"
 publish = false
+
+build = "build.rs"
+
+[build-dependencies]
+winresource = "0.1.23"
 
 [dependencies]
 anyhow = "1.0.104"

@@ -64,6 +64,16 @@ if (Test-Path -LiteralPath $UninstallSrc) {
     throw "uninstall.ps1 not found at $UninstallSrc"
 }
 
+$InstallSrc = Join-Path $ScriptDir "install.ps1"
+if (Test-Path -LiteralPath $InstallSrc) {
+    Copy-Item -LiteralPath $InstallSrc -Destination (Join-Path $StageDir "install.ps1") -Force
+}
+
+$IconSrc = Join-Path $Root (Join-Path "assets" "icon.ico")
+if (Test-Path -LiteralPath $IconSrc) {
+    Copy-Item -LiteralPath $IconSrc -Destination (Join-Path $StageDir "icon.ico") -Force
+}
+
 Write-Host "Staged portable folder:"
 Write-Host "  $StageDir"
 
