@@ -50,3 +50,61 @@ pub use config::{AppConfig, GameCatalog};
 pub use contract::{ContractRole, GameContract};
 pub use detect::{classify_process, ProcessClass, ProcessSnapshot};
 pub use optimize::{optimize_system, OptimizeReport, OptimizeRequest};
+
+#[cfg(test)]
+mod release_packaging {
+    #[test]
+    fn packaging_files_embed_crate_version() {
+        let version = env!("CARGO_PKG_VERSION");
+        let files = [
+            (
+                "installer/install.ps1",
+                include_str!("../installer/install.ps1"),
+            ),
+            (
+                "installer/GameOptimizer.iss",
+                include_str!("../installer/GameOptimizer.iss"),
+            ),
+            (
+                "installer/package.ps1",
+                include_str!("../installer/package.ps1"),
+            ),
+            ("changelog.md", include_str!("../changelog.md")),
+            ("README.md", include_str!("../README.md")),
+            (
+                "assets/app.manifest",
+                include_str!("../assets/app.manifest"),
+            ),
+        ];
+        for (name, body) in files {
+            assert!(
+                body.contains(version),
+                "{name} does not mention crate version {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn end_user_installer_does_not_require_cargo_by_default() {
+        let install = include_str!("../installer/install.ps1");
+        assert!(install.contains("[switch]$Build"));
+        assert!(
+            install.contains("Does NOT run cargo unless -Build")
+                || install.contains("does NOT run cargo unless -Build")
+        );
+        assert!(install.contains("Uninstall\\GameOptimizer"));
+        assert!(install.contains("HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"));
+        assert!(install.contains(".autostart-initialized"));
+    }
+
+    #[test]
+    fn gui_has_no_activity_log_surface() {
+        let gui = include_str!("gui.rs");
+        assert!(
+            !gui.contains("Atividade"),
+            "activity log section should stay removed"
+        );
+        assert!(!gui.contains("push_log"));
+        assert!(!gui.contains("logs: Vec"));
+    }
+}

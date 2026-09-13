@@ -64,7 +64,7 @@ pub fn run(config_path: PathBuf) -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([760.0, 520.0])
             .with_min_inner_size([680.0, 460.0])
-            .with_title("Game Optimizer")
+            .with_title(win_window::WINDOW_TITLE)
             .with_icon(eframe_icon()),
         ..Default::default()
     };
@@ -256,17 +256,17 @@ impl GuiApp {
     }
 
     fn snapshot_maximized(&mut self, ctx: &egui::Context) {
-        if let Some(maximized) = ctx.input(|i| i.viewport().maximized) {
-            self.restore_maximized = maximized;
-        } else if let Some(maximized) = win_window::is_main_window_maximized() {
-            self.restore_maximized = maximized;
-        }
+        self.restore_maximized = win_window::remembered_maximized(
+            ctx.input(|i| i.viewport().maximized),
+            win_window::is_main_window_maximized(),
+        );
     }
 
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         self.snapshot_maximized(ctx);
         self.in_tray = true;
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        let _ = win_window::hide_main_window();
     }
 
     fn restore_from_tray(&mut self, ctx: &egui::Context) {
@@ -358,8 +358,11 @@ impl App for GuiApp {
             self.hide_to_tray(ctx);
         }
 
-        // Keep the event loop alive while hidden so tray clicks restore.
-        ctx.request_repaint_after(Duration::from_millis(200));
+        // Keep the event loop alive only while hidden so tray clicks restore
+        // without a constant idle repaint when the window is visible.
+        if self.in_tray {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut Frame) {
@@ -434,7 +437,7 @@ impl GuiApp {
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             metric_pill(ui, "Jogos abertos", &self.game_count().to_string(), ACCENT);
-            metric_pill(ui, "RAM extra", &self.reclaim_count().to_string(), OK);
+            metric_pill(ui, "Apps grandes", &self.reclaim_count().to_string(), OK);
             if ui
                 .add(
                     egui::Button::new(RichText::new("Minimizar").color(MUTED).size(12.0))
@@ -566,19 +569,6 @@ impl GuiApp {
                             }
                         }
 
-                        ui.add_space(4.0);
-                        ui.checkbox(
-                            &mut self.trim_game_memory,
-                            RichText::new("Liberar RAM do jogo").color(TEXT).size(13.5),
-                        );
-                        ui.label(
-                            RichText::new(
-                                "Pode dar uma travadinha. Deixe desligado se não tiver certeza.",
-                            )
-                            .color(WARN)
-                            .size(11.5),
-                        );
-
                         if self.watching {
                             ui.add_space(8.0);
                             ui.label(
@@ -592,57 +582,78 @@ impl GuiApp {
                             );
                         }
 
-                        ui.add_space(10.0);
-                        ui.label(
-                            RichText::new(
-                                "Limpar pasta Temp do Windows. Não apaga cache de jogos.",
-                            )
-                            .color(MUTED)
-                            .size(11.5),
-                        );
-                        ui.add_space(4.0);
-                        let cache_label = if self.cache_armed {
-                            "Confirmar limpeza"
-                        } else {
-                            "Limpar arquivos temporários"
-                        };
-                        let cache_fill = if self.cache_armed {
-                            Color32::from_rgb(96, 56, 32)
-                        } else {
-                            BG_ROW
-                        };
-                        if ui
-                            .add_enabled(
-                                !self.busy,
-                                egui::Button::new(RichText::new(cache_label).color(TEXT))
-                                    .fill(cache_fill)
-                                    .corner_radius(9.0)
-                                    .min_size(Vec2::new(ui.available_width(), 34.0)),
-                            )
-                            .clicked()
-                        {
-                            if self.cache_armed {
-                                let _ = self.ui_tx.send(UiCmd::CleanCache);
-                                self.status = "Limpando arquivos temporários…".into();
+                        ui.add_space(8.0);
+                        egui::CollapsingHeader::new(
+                            RichText::new("Mais opções").color(MUTED).size(13.0),
+                        )
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.add_space(4.0);
+                            ui.checkbox(
+                                &mut self.trim_game_memory,
+                                RichText::new("Liberar RAM do jogo").color(TEXT).size(13.5),
+                            );
+                            ui.label(
+                                RichText::new(
+                                    "Pode dar uma travadinha. Deixe desligado se não tiver certeza.",
+                                )
+                                .color(WARN)
+                                .size(11.5),
+                            );
+
+                            ui.add_space(10.0);
+                            ui.label(
+                                RichText::new(
+                                    "Limpar pasta Temp do Windows. Não apaga cache de jogos.",
+                                )
+                                .color(MUTED)
+                                .size(11.5),
+                            );
+                            ui.add_space(4.0);
+                            let cache_label = if self.cache_armed {
+                                "Confirmar limpeza"
                             } else {
-                                self.cache_armed = true;
-                                self.status =
-                                    "Toque de novo para confirmar a limpeza da pasta Temp.".into();
-                            }
-                        }
-                        if self.cache_armed
-                            && ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new("Cancelar").color(MUTED).size(12.0),
-                                    )
-                                    .fill(Color32::TRANSPARENT),
+                                "Limpar arquivos temporários"
+                            };
+                            let cache_fill = if self.cache_armed {
+                                Color32::from_rgb(96, 56, 32)
+                            } else {
+                                BG_ROW
+                            };
+                            if ui
+                                .add_enabled(
+                                    !self.busy,
+                                    egui::Button::new(RichText::new(cache_label).color(TEXT))
+                                        .fill(cache_fill)
+                                        .corner_radius(9.0)
+                                        .min_size(Vec2::new(ui.available_width(), 34.0)),
                                 )
                                 .clicked()
-                        {
-                            self.cache_armed = false;
-                            self.status = "Limpeza cancelada.".into();
-                        }
+                            {
+                                if self.cache_armed {
+                                    let _ = self.ui_tx.send(UiCmd::CleanCache);
+                                    self.status = "Limpando arquivos temporários…".into();
+                                } else {
+                                    self.cache_armed = true;
+                                    self.status =
+                                        "Toque de novo para confirmar a limpeza da pasta Temp."
+                                            .into();
+                                }
+                            }
+                            if self.cache_armed
+                                && ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Cancelar").color(MUTED).size(12.0),
+                                        )
+                                        .fill(Color32::TRANSPARENT),
+                                    )
+                                    .clicked()
+                            {
+                                self.cache_armed = false;
+                                self.status = "Limpeza cancelada.".into();
+                            }
+                        });
                     });
             });
         });

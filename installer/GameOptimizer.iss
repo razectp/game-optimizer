@@ -61,6 +61,9 @@ Source: "..\games.toml"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexis
 Source: "uninstall.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
+[UninstallDelete]
+Type: files; Name: "{app}\.autostart-initialized"
+
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; WorkingDir: "{app}"; Comment: "{#AppName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; WorkingDir: "{app}"; Comment: "{#AppName}"; Tasks: desktopicon
@@ -93,4 +96,10 @@ function InitializeUninstall(): Boolean;
 begin
   CloseAppIfRunning;
   Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    SaveStringToFile(ExpandConstant('{app}\.autostart-initialized'), '1', False);
 end;

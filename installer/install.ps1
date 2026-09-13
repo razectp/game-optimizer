@@ -193,6 +193,10 @@ if ($ConfigSrc) {
 
 Copy-Item -LiteralPath $UninstallSrc -Destination (Join-Path $InstallDir "uninstall.ps1") -Force
 
+# Remember that install already chose autostart on/off so the GUI does not
+# re-enable it on the next launch.
+Set-Content -LiteralPath (Join-Path $InstallDir ".autostart-initialized") -Value "1" -Encoding ASCII
+
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $autostartOn = -not $NoAutostart
 if ($autostartOn) {

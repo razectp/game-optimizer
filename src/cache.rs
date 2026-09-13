@@ -82,20 +82,36 @@ pub fn is_denied_cache_path(path: &Path) -> bool {
     DENY.iter().any(|marker| s.contains(marker))
 }
 
+/// True when a path is an OS/system location that must never be cleaned,
+/// including a `GetTempPath` fallback to `%WINDIR%`.
+pub fn is_unsafe_cache_root(path: &Path) -> bool {
+    if is_denied_cache_path(path) {
+        return true;
+    }
+    let s = normalize_path(path);
+    if s.ends_with(":\\") || s == "\\" || s == "/" {
+        return true;
+    }
+    let under_appdata = s.contains("\\appdata\\");
+    if !under_appdata && (s.ends_with("\\windows") || s.contains("\\windows\\")) {
+        return true;
+    }
+    false
+}
+
 /// True when `path` is a standard user temp/cache root we are willing to clean.
 pub fn is_allowed_cache_path(path: &Path) -> bool {
-    if is_denied_cache_path(path) {
+    if is_unsafe_cache_root(path) {
         return false;
     }
     let s = normalize_path(path);
-    if s.len() < 6 || s.ends_with(":\\") || s == "\\" || s == "/" {
-        return false;
-    }
 
     if let Ok(temp) = std::env::temp_dir().canonicalize() {
-        if let Ok(canonical) = path.canonicalize() {
-            if canonical == temp || canonical.starts_with(&temp) {
-                return true;
+        if !is_unsafe_cache_root(&temp) {
+            if let Ok(canonical) = path.canonicalize() {
+                if canonical == temp || canonical.starts_with(&temp) {
+                    return true;
+                }
             }
         }
     }
@@ -261,6 +277,21 @@ mod tests {
     fn rejects_drive_roots() {
         assert!(!is_allowed_cache_path(Path::new(r"C:\")));
         assert!(!is_allowed_cache_path(Path::new("/")));
+    }
+
+    #[test]
+    fn rejects_windows_directory_temp_fallback() {
+        assert!(is_unsafe_cache_root(Path::new(r"C:\Windows")));
+        assert!(is_unsafe_cache_root(Path::new(r"C:\Windows\Temp")));
+        assert!(is_unsafe_cache_root(Path::new(r"C:\WINDOWS\system32")));
+        assert!(!is_allowed_cache_path(Path::new(r"C:\Windows")));
+        assert!(!is_allowed_cache_path(Path::new(r"C:\Windows\Temp")));
+        assert!(is_allowed_cache_path(Path::new(
+            r"C:\Users\me\AppData\Local\Temp"
+        )));
+        assert!(!is_unsafe_cache_root(Path::new(
+            r"C:\Users\me\AppData\Local\Microsoft\Windows\INetCache"
+        )));
     }
 
     #[test]
