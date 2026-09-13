@@ -26,16 +26,18 @@ For each detected game identity, GPC builds a per-PID contract that:
 | Surface | Behavior |
 |---------|----------|
 | Default launch (no args) / `--gui` | Native GUI; close/minimize hides to tray |
-| Tray | Double-click or menu to restore; Quit exits |
+| Tray | Click, double-click, or menu restores; maximized state is preserved; Quit exits |
 | Autostart | Enabled by default (installer + first GUI run); toggle in GUI |
 | CLI subcommands | `scan`, `optimize`, `watch`, `games`, `autostart` |
-| Installer | `installer/install.ps1` → `%LOCALAPPDATA%\GameOptimizer` |
+| Installer | Per-user `%LOCALAPPDATA%\GameOptimizer`; PowerShell + Inno Setup; Apps & features |
+| Temp cleanup | Optional, confirmed GUI action on user Temp / INetCache only |
 
 ## Non-goals
 
 - Closing, killing, suspending, or injecting into game processes
 - Forcing game working-set MiB down by default (pages the game out → more stutter)
 - Overclocking, GPU driver changes, or cheat/anti-cheat bypass
+- Deleting shader caches, Prefetch, or Windows Update files
 - Cross-platform support (Windows only)
 
 ## Acceptance criteria
@@ -44,7 +46,11 @@ For each detected game identity, GPC builds a per-PID contract that:
 2. `optimize` / `watch` / GUI apply GPC to matched game PIDs; optional non-game reclaim.
 3. Dual same-name instances receive disjoint CPU slices when enough cores exist.
 4. Never terminates processes.
-5. `scan` / GUI scan reports games, reclaim candidates, and planned actions.
-6. GUI is usable for non-technical users (PT-BR labels); minimize/close → tray.
-7. Installer enables Start with Windows by default (`-NoAutostart` to skip).
-8. `cargo check`, `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test` pass.
+5. GUI scan reports games and reclaim candidates without a noisy activity log.
+6. GUI is usable for non-technical users (PT-BR labels); minimize/close → tray;
+   restore from tray returns visibility, focus, and maximized state when it was maximized.
+7. End-user installer does not require Rust; registers uninstall; Start with Windows
+   is on by default (`-NoAutostart` to skip).
+8. Optional Temp cleanup only targets allowlisted user cache folders and refuses
+   shader/OS-critical paths.
+9. `cargo check`, `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test` pass.
