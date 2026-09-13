@@ -1,0 +1,43 @@
+[package]
+name = "game_optimizer"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Windows game performance optimizer with GUI, tray, and installer"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+auto-launch = "0.6.0"
+clap = { version = "4.6.6", features = ["derive"] }
+eframe = { version = "0.36.2", default-features = false, features = [
+  "accesskit",
+  "default_fonts",
+  "glow",
+] }
+egui = "0.36.2"
+image = { version = "0.25.6", default-features = false, features = ["png"] }
+serde = { version = "1.0.229", features = ["derive"] }
+sysinfo = "0.39.6"
+toml = "0.9.5"
+tray-icon = "0.25.0"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+  "Win32_System_ProcessStatus",
+  "Win32_Security",
+  "Win32_System_SystemServices",
+  "Win32_System_SystemInformation",
+  "Win32_System_Memory",
+  "Win32_System_Console",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

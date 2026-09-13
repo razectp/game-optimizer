@@ -1,0 +1,21 @@
+# Extra game process names (optional). Built-in list covers many titles.
+
+[games]
+names = [
+  # "MyGame.exe",
+]
+
+[settings]
+boost_priority = true
+disable_power_throttling = true
+raise_memory_priority = true
+enable_priority_boost = true
+prefer_performance_cores = true
+residency_floor_percent = 60
+# Optional: empty game working sets (may hitch). Also: --trim-game-memory
+trim_game_memory = false
+# Trim Chrome/Edge/other large non-games to free RAM for the game
+trim_non_game_memory = true
+memory_trim_threshold_mb = 200
+max_trim_candidates = 12
+# never_trim_names = ["discord"]
