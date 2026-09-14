@@ -83,7 +83,7 @@ pub enum OptimizeAction {
         /// Process display name.
         name: String,
     },
-    /// Empty a large non-game working set (Chrome, Edge, …).
+    /// Empty a large **browser** working set (Chrome, Edge, Firefox, …).
     TrimNonGameWorkingSet {
         /// Target process id.
         pid: u32,
@@ -128,7 +128,7 @@ pub struct ActionResult {
 pub struct OptimizeReport {
     /// Detected game processes.
     pub games: Vec<ProcessSnapshot>,
-    /// Non-game reclaim candidates (Chrome, …).
+    /// Browser reclaim candidates (Chrome, Edge, Firefox, …).
     pub reclaim_candidates: Vec<ProcessSnapshot>,
     /// GPC contracts computed for this pass.
     pub contracts: Vec<GameContract>,
@@ -403,5 +403,32 @@ mod tests {
         assert!(actions
             .iter()
             .any(|a| matches!(a, OptimizeAction::TrimNonGameWorkingSet { pid: 100, .. })));
+    }
+
+    #[test]
+    fn ignored_encoder_is_not_trimmed() {
+        let config = AppConfig {
+            boost_priority: false,
+            disable_power_throttling: false,
+            raise_memory_priority: false,
+            enable_priority_boost: false,
+            prefer_performance_cores: false,
+            residency_floor_percent: 0,
+            trim_game_memory: false,
+            trim_non_game_memory: true,
+            ..AppConfig::default()
+        };
+        let ffmpeg = ProcessSnapshot {
+            pid: 70,
+            name: "ffmpeg.exe".into(),
+            normalized_name: "ffmpeg".into(),
+            memory_bytes: 2_000_000_000,
+            exe_path: None,
+            class: ProcessClass::Ignored,
+        };
+        let actions = plan_actions(&config, &[], &[ffmpeg]);
+        assert!(actions
+            .iter()
+            .all(|a| !matches!(a, OptimizeAction::TrimNonGameWorkingSet { pid: 70, .. })));
     }
 }

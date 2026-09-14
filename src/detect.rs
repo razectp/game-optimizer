@@ -13,7 +13,7 @@ pub enum ProcessClass {
     Game,
     /// OS / security critical — leave untouched.
     Protected,
-    /// Large non-game eligible for working-set reclaim (e.g. Chrome).
+    /// Large **browser** eligible for working-set reclaim (Chrome, Edge, Firefox).
     ReclaimCandidate,
     /// Everything else — left alone.
     Ignored,
@@ -89,19 +89,27 @@ pub fn classify_process(
     if is_protected_name(normalized_name) {
         return ProcessClass::Protected;
     }
+    if is_helper_tool(normalized_name) {
+        return ProcessClass::Ignored;
+    }
     if is_game(config, normalized_name, exe_path) {
         return ProcessClass::Game;
     }
     if config.never_trim_names.contains(normalized_name) {
         return ProcessClass::Ignored;
     }
-    if memory_bytes >= config.memory_trim_threshold_bytes {
+    if config.reclaim_names.contains(normalized_name)
+        && memory_bytes >= config.memory_trim_threshold_bytes
+    {
         return ProcessClass::ReclaimCandidate;
     }
     ProcessClass::Ignored
 }
 
 fn is_game(config: &AppConfig, normalized_name: &str, exe_path: Option<&Path>) -> bool {
+    if is_helper_tool(normalized_name) {
+        return false;
+    }
     if config.game_names.contains(normalized_name) {
         return true;
     }
@@ -128,6 +136,40 @@ fn is_game(config: &AppConfig, normalized_name: &str, exe_path: Option<&Path>) -
         }
     }
     false
+}
+
+/// Encoders and crash helpers must never be treated as games or trim targets.
+///
+/// `EmptyWorkingSet` pages RAM to disk; doing that to ffmpeg (or a similar
+/// encoder) while it is assembling video causes stalls and dropped frames.
+fn is_helper_tool(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "ffmpeg"
+            | "ffplay"
+            | "ffprobe"
+            | "handbrake"
+            | "handbrakecli"
+            | "obs64"
+            | "obs32"
+            | "obs"
+            | "afterfx"
+            | "blender"
+            | "capcut"
+            | "shotcut"
+            | "kdenlive"
+            | "resolve"
+            | "davinci resolve"
+            | "adobe premiere pro"
+            | "premiere pro"
+            | "adobe media encoder"
+            | "nvencc"
+            | "qsvencc"
+            | "vceencc"
+            | "crashpad_handler"
+            | "unitycrashhandler64"
+            | "unitycrashhandler32"
+    )
 }
 
 fn is_protected_name(normalized: &str) -> bool {
@@ -190,6 +232,42 @@ mod tests {
     fn chrome_large_is_reclaim_candidate() {
         let class = classify_process(&cfg(), 1, 99, "chrome", 500 * 1024 * 1024, None);
         assert_eq!(class, ProcessClass::ReclaimCandidate);
+    }
+
+    #[test]
+    fn firefox_and_edge_are_reclaim_candidates() {
+        let cfg = cfg();
+        assert_eq!(
+            classify_process(&cfg, 1, 2, "firefox", 400 * 1024 * 1024, None),
+            ProcessClass::ReclaimCandidate
+        );
+        assert_eq!(
+            classify_process(&cfg, 1, 3, "msedge", 400 * 1024 * 1024, None),
+            ProcessClass::ReclaimCandidate
+        );
+    }
+
+    #[test]
+    fn large_non_browser_is_not_trimmed() {
+        let class = classify_process(&cfg(), 1, 44, "notepad++", 800 * 1024 * 1024, None);
+        assert_eq!(class, ProcessClass::Ignored);
+    }
+
+    #[test]
+    fn ffmpeg_is_never_reclaim_or_game() {
+        let cfg = cfg();
+        let class = classify_process(&cfg, 1, 70, "ffmpeg", 2_000_000_000, None);
+        assert_eq!(class, ProcessClass::Ignored);
+        let steam_ffmpeg =
+            Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Tool\ffmpeg.exe");
+        let class = classify_process(&cfg, 1, 71, "ffmpeg", 2_000_000_000, Some(steam_ffmpeg));
+        assert_eq!(class, ProcessClass::Ignored);
+    }
+
+    #[test]
+    fn chrome_below_threshold_is_ignored() {
+        let class = classify_process(&cfg(), 1, 99, "chrome", 50 * 1024 * 1024, None);
+        assert_eq!(class, ProcessClass::Ignored);
     }
 
     #[test]

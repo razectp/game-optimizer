@@ -43,7 +43,8 @@ For each detected game identity, GPC builds a per-PID contract that:
 ## Acceptance criteria
 
 1. Detects games via built-in allowlist + `games.toml` + install-path heuristics.
-2. `optimize` / `watch` / GUI apply GPC to matched game PIDs; optional non-game reclaim.
+2. `optimize` / `watch` / GUI apply GPC to matched game PIDs; optional
+   **browser-only** working-set reclaim (never ffmpeg/encoders/editors).
 3. Dual same-name instances receive disjoint CPU slices when enough cores exist.
 4. Never terminates processes.
 5. GUI scan reports games and reclaim candidates without a noisy activity log.
