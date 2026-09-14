@@ -64,6 +64,8 @@ jobs:
 
             **Portátil:** `GameOptimizer-0.5.0.exe` ou o zip com `install.ps1` (o app abre um assistente no primeiro uso).
 
+            Trim de memória extra só em navegadores (Chrome/Edge/Firefox). FFmpeg, OBS, Premiere e outros programas grandes não são esvaziados.
+
             ```powershell
             powershell -ExecutionPolicy Bypass -File .\install.ps1
             ```
