@@ -25,6 +25,9 @@
   license, install folder, desktop shortcut, and start-with-Windows.
 - First-run wizard in the GUI (portable builds and `game_optimizer --setup`);
   skipped after the Inno installer, which writes `.setup-wizard-complete`.
+- Non-game memory trim is **browsers only** (Chrome, Edge, Firefox, …). FFmpeg,
+  OBS, Premiere and other large apps are never emptied — `EmptyWorkingSet` on
+  an encoder pages its RAM to disk and can stall video export.
 
 ## 0.4.0 — 2026-09-13
 

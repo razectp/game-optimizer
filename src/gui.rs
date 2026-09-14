@@ -787,7 +787,7 @@ impl GuiApp {
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             metric_pill(ui, "Jogos abertos", &self.game_count().to_string(), ACCENT);
-            metric_pill(ui, "Apps grandes", &self.reclaim_count().to_string(), OK);
+            metric_pill(ui, "Navegadores", &self.reclaim_count().to_string(), OK);
             if ui
                 .add(
                     egui::Button::new(RichText::new("Minimizar").color(MUTED).size(12.0))
@@ -1103,7 +1103,7 @@ impl GuiApp {
             ui.add_space(8.0);
             ui.label(
                 RichText::new(format!(
-                    "Pode ceder RAM · {} app(s)",
+                    "Pode ceder RAM · {} navegador(es)",
                     report.reclaim_candidates.len()
                 ))
                 .color(MUTED)

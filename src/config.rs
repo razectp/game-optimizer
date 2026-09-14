@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 pub struct AppConfig {
     /// Process names treated as games (lowercase, without `.exe`).
     pub game_names: BTreeSet<String>,
-    /// Non-game names that must never be working-set trimmed (editors/shells).
+    /// Non-game names that must never be working-set trimmed (editors/shells/encoders).
     pub never_trim_names: BTreeSet<String>,
+    /// Non-game names allowed for working-set trim (browsers only by default).
+    pub reclaim_names: BTreeSet<String>,
     /// Whether to raise game process priority to High.
     pub boost_priority: bool,
     /// Whether to disable power throttling / EcoQoS on games.
@@ -27,7 +29,7 @@ pub struct AppConfig {
     pub residency_floor_percent: u8,
     /// Empty the game working set (pages cold memory out; may hitch briefly).
     pub trim_game_memory: bool,
-    /// Empty large non-game working sets (Chrome, Edge, …) to free RAM for games.
+    /// Empty large **browser** working sets (Chrome, Edge, Firefox, …) to free RAM for games.
     pub trim_non_game_memory: bool,
     /// Minimum working set (bytes) before a non-game is a trim candidate.
     pub memory_trim_threshold_bytes: u64,
@@ -42,6 +44,7 @@ impl Default for AppConfig {
         Self {
             game_names: GameCatalog::builtin_names(),
             never_trim_names: GameCatalog::builtin_never_trim_names(),
+            reclaim_names: GameCatalog::builtin_reclaim_names(),
             boost_priority: true,
             disable_power_throttling: true,
             raise_memory_priority: true,
@@ -78,10 +81,15 @@ impl AppConfig {
         for name in file.settings.never_trim_names.unwrap_or_default() {
             never_trim.insert(normalize_process_name(&name));
         }
+        let mut reclaim = GameCatalog::builtin_reclaim_names();
+        for name in file.settings.reclaim_names.unwrap_or_default() {
+            reclaim.insert(normalize_process_name(&name));
+        }
         let threshold_mb = file.settings.memory_trim_threshold_mb.unwrap_or(200);
         Self {
             game_names: names,
             never_trim_names: never_trim,
+            reclaim_names: reclaim,
             boost_priority: file.settings.boost_priority.unwrap_or(true),
             disable_power_throttling: file.settings.disable_power_throttling.unwrap_or(true),
             raise_memory_priority: file.settings.raise_memory_priority.unwrap_or(true),
@@ -144,7 +152,7 @@ impl GameCatalog {
         .collect()
     }
 
-    /// Editors/shells that should keep their working set.
+    /// Editors, shells, and media tools that should keep their working set.
     pub fn builtin_never_trim_names() -> BTreeSet<String> {
         [
             "cursor",
@@ -158,6 +166,55 @@ impl GameCatalog {
             "pwsh",
             "cmd",
             "windows terminal",
+            "ffmpeg",
+            "ffplay",
+            "ffprobe",
+            "handbrake",
+            "handbrakecli",
+            "obs64",
+            "obs32",
+            "obs",
+            "afterfx",
+            "blender",
+            "capcut",
+            "shotcut",
+            "kdenlive",
+            "resolve",
+            "davinci resolve",
+            "adobe premiere pro",
+            "premiere pro",
+            "adobe media encoder",
+            "nvencc",
+            "qsvencc",
+            "vceencc",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    /// Browsers whose working set may be emptied to free RAM for games.
+    pub fn builtin_reclaim_names() -> BTreeSet<String> {
+        [
+            "chrome",
+            "chromium",
+            "msedge",
+            "microsoftedge",
+            "firefox",
+            "firefoxdeveloperedition",
+            "librewolf",
+            "waterfox",
+            "brave",
+            "opera",
+            "operagx",
+            "vivaldi",
+            "thorium",
+            "floorp",
+            "palemoon",
+            "seamonkey",
+            "iexplore",
+            "plugin-container",
+            "arc",
         ]
         .into_iter()
         .map(str::to_string)
@@ -201,7 +258,7 @@ pub struct SettingsSection {
     pub residency_floor_percent: Option<u8>,
     /// Empty game working sets (may cause brief hitching when pages fault back).
     pub trim_game_memory: Option<bool>,
-    /// Empty large non-game working sets (Chrome/Edge/…).
+    /// Empty large **browser** working sets (Chrome/Edge/…).
     pub trim_non_game_memory: Option<bool>,
     /// Non-game WS threshold in MiB for trim candidates.
     pub memory_trim_threshold_mb: Option<u64>,
@@ -209,6 +266,8 @@ pub struct SettingsSection {
     pub max_trim_candidates: Option<usize>,
     /// Extra process names never trimmed.
     pub never_trim_names: Option<Vec<String>>,
+    /// Extra process names allowed for non-game working-set trim.
+    pub reclaim_names: Option<Vec<String>>,
 }
 
 /// Normalize a process name for allowlist comparison.
@@ -263,5 +322,32 @@ mod tests {
         assert!(cfg.game_names.contains("cs2"));
         assert!(cfg.raise_memory_priority);
         assert!(cfg.prefer_performance_cores);
+        assert!(cfg.reclaim_names.contains("chrome"));
+        assert!(cfg.never_trim_names.contains("ffmpeg"));
+    }
+
+    #[test]
+    fn extra_reclaim_names_merge_from_toml() {
+        let file = ConfigFile {
+            games: GamesSection::default(),
+            settings: SettingsSection {
+                reclaim_names: Some(vec!["MyBrowser.EXE".into()]),
+                ..SettingsSection::default()
+            },
+        };
+        let cfg = AppConfig::from_file(file, None);
+        assert!(cfg.reclaim_names.contains("mybrowser"));
+        assert!(cfg.reclaim_names.contains("chrome"));
+        assert!(!cfg.reclaim_names.contains("ffmpeg"));
+    }
+
+    #[test]
+    fn reclaim_allowlist_is_browsers_not_encoders() {
+        let reclaim = GameCatalog::builtin_reclaim_names();
+        assert!(reclaim.contains("chrome"));
+        assert!(reclaim.contains("msedge"));
+        assert!(reclaim.contains("firefox"));
+        assert!(!reclaim.contains("ffmpeg"));
+        assert!(!reclaim.contains("obs64"));
     }
 }

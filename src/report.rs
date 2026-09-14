@@ -13,7 +13,7 @@ pub fn render_report(report: &OptimizeReport) -> String {
     let mut lines = Vec::new();
     lines.push(String::from("=== Game Optimizer (GPC) ==="));
     lines.push(String::from(
-        "Scope: GPC on games + optional WS trim for large non-games (Chrome/…)",
+        "Scope: GPC on games + optional WS trim for browsers only",
     ));
     if report.dry_run {
         lines.push(String::from("Mode: dry-run (no changes applied)"));
@@ -53,7 +53,7 @@ pub fn render_report(report: &OptimizeReport) -> String {
 
     lines.push(String::new());
     lines.push(format!(
-        "Non-game reclaim candidates: {}",
+        "Browser reclaim candidates: {}",
         report.reclaim_candidates.len()
     ));
     for proc in report.reclaim_candidates.iter().take(12) {

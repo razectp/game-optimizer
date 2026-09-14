@@ -87,7 +87,7 @@ Requires Rust stable 1.85+.
 | Memory priority | Biases OS to keep game pages resident |
 | Residency floor | Soft minimum working set for the game |
 | CPU-set / affinity partition | Split cores across multi-instance games |
-| Non-game WS trim | Reclaims Chrome/Edge/… (configurable) |
+| Non-game WS trim | Reclaims **browsers only** (Chrome/Edge/Firefox/…) |
 | Trim memória do jogo | Optional empty of game working sets |
 
 The GUI can also clean the **user Temp / INetCache** folders (confirm in the

@@ -1,7 +1,7 @@
 //! Game-only Windows performance optimizer (GPC).
 //!
 //! Applies a Game Performance Contract to detected games — never terminates
-//! them. May reclaim working sets of large non-game apps when configured.
+//! them. May reclaim working sets of **browsers** when configured.
 
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
