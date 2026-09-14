@@ -1,0 +1,10 @@
+Game Optimizer — assistente de instalação
+
+Este programa deixa jogos abertos mais fluidos: prioridade alta, memória
+protegida e, se você quiser, menos RAM em apps grandes como o Chrome.
+
+Nunca fecha jogos. Não precisa de administrador. A instalação fica só na
+sua conta do Windows (%LOCALAPPDATA%\GameOptimizer).
+
+Na próxima tela você escolhe a pasta, o atalho da área de trabalho e se o
+otimizador deve iniciar junto com o Windows.

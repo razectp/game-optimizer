@@ -1,9 +1,9 @@
-﻿; Game Optimizer — per-user Inno Setup installer (no admin required).
+﻿; Game Optimizer — per-user Inno Setup wizard (no admin required).
 ; Compile: iscc installer\GameOptimizer.iss
 ; Requires a release binary at ..\target\release\game_optimizer.exe
 
 #define AppName "Game Optimizer"
-#define AppVersion "0.4.0"
+#define AppVersion "0.5.0"
 #define AppPublisher "Game Optimizer"
 #define AppExeName "game_optimizer.exe"
 #define AppMutexName "GameOptimizer"
@@ -20,7 +20,13 @@ VersionInfoCompany={#AppPublisher}
 VersionInfoProductName={#AppName}
 DefaultDirName={localappdata}\GameOptimizer
 DefaultGroupName={#AppName}
+DisableWelcomePage=no
+DisableDirPage=no
 DisableProgramGroupPage=yes
+DisableReadyPage=no
+DisableFinishedPage=no
+AlwaysShowDirOnReadyPage=yes
+ShowTasksTreeLines=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist
 OutputBaseFilename=GameOptimizer-{#AppVersion}-setup
@@ -30,6 +36,10 @@ MinVersion=10.0
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
+WizardSizePercent=120
+WizardResizable=yes
+WizardImageFile=wizard-sidebar.bmp
+WizardSmallImageFile=wizard-small.bmp
 UninstallDisplayIcon={app}\{#AppExeName}
 UninstallDisplayName={#AppName}
 SetupIconFile=..\assets\icon.ico
@@ -38,18 +48,39 @@ CloseApplicationsFilter=game_optimizer.exe
 RestartApplications=no
 UsedUserAreasWarning=no
 LanguageDetectionMethod=uilanguage
-ShowLanguageDialog=auto
+ShowLanguageDialog=yes
+SetupLogging=yes
 AppMutex={#AppMutexName}Setup
 
 [Languages]
-Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
-Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"; InfoBeforeFile: "welcome-pt.txt"; LicenseFile: "license-pt.txt"
+Name: "english"; MessagesFile: "compiler:Default.isl"; InfoBeforeFile: "welcome-en.txt"; LicenseFile: "license-en.txt"
+
+[Messages]
+brazilianportuguese.BeveledLabel=Game Optimizer
+english.BeveledLabel=Game Optimizer
+brazilianportuguese.WelcomeLabel1=Bem-vindo ao assistente de instalação do [name]
+brazilianportuguese.WelcomeLabel2=Este assistente vai instalar o [name/ver] nesta conta do Windows. Não precisa de administrador.%n%nO Game Optimizer deixa seus jogos mais fluidos e nunca fecha nenhum jogo.%n%nClique em Avançar para continuar.
+english.WelcomeLabel1=Welcome to the [name] Setup Wizard
+english.WelcomeLabel2=This will install [name/ver] for this Windows account. Administrator rights are not required.%n%nGame Optimizer keeps your games smoother and never closes them.%n%nClick Next to continue.
+brazilianportuguese.FinishedHeadingLabel=Concluiu a instalação do [name]
+brazilianportuguese.FinishedLabel=O [name] está instalado. Você pode abrir o programa agora ou depois pelo Menu Iniciar.
+english.FinishedHeadingLabel=Completing the [name] Setup Wizard
+english.FinishedLabel=[name] is installed. You can launch it now or later from the Start Menu.
 
 [CustomMessages]
 brazilianportuguese.StartWithWindows=Iniciar com o Windows (recomendado)
 english.StartWithWindows=Start with Windows (recommended)
 brazilianportuguese.StartupGroup=Inicialização:
 english.StartupGroup=Startup:
+brazilianportuguese.FeaturesTitle=O que será instalado
+english.FeaturesTitle=What will be installed
+brazilianportuguese.FeaturesSub=Game Optimizer na sua conta do Windows
+english.FeaturesSub=Game Optimizer for this Windows account
+brazilianportuguese.FeaturesCaption=Resumo do que o assistente copia e configura:
+english.FeaturesCaption=Summary of what Setup copies and configures:
+brazilianportuguese.FeaturesBody=Pasta do programa (sua conta, sem admin)%nAtalho no Menu Iniciar%nAtalho na Área de Trabalho (opcional)%nInício com o Windows (opcional, recomendado)%n%nO otimizador detecta jogos abertos, ajusta prioridade e memória, e pode ir para a bandeja. Nenhum jogo é fechado.%n%nA limpeza da pasta Temp, se você usar depois no app, só atinge arquivos temporários do seu usuário.
+english.FeaturesBody=Program folder (this account, no admin)%nStart Menu shortcut%nDesktop shortcut (optional)%nStart with Windows (optional, recommended)%n%nThe optimizer detects running games, adjusts priority and memory, and can sit in the tray. Games are never closed.%n%nTemp cleanup, if you use it later in the app, only touches this user's temporary files.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
@@ -63,6 +94,7 @@ Source: "..\assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion skipifsourc
 
 [UninstallDelete]
 Type: files; Name: "{app}\.autostart-initialized"
+Type: files; Name: "{app}\.setup-wizard-complete"
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; WorkingDir: "{app}"; Comment: "{#AppName}"
@@ -78,6 +110,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: 
 Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+var
+  FeaturesPage: TOutputMsgMemoWizardPage;
+
 procedure CloseAppIfRunning;
 var
   ResultCode: Integer;
@@ -98,8 +133,22 @@ begin
   Result := True;
 end;
 
+procedure InitializeWizard;
+begin
+  FeaturesPage := CreateOutputMsgMemoPage(
+    wpWelcome,
+    CustomMessage('FeaturesTitle'),
+    CustomMessage('FeaturesSub'),
+    CustomMessage('FeaturesCaption'),
+    CustomMessage('FeaturesBody'));
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
     SaveStringToFile(ExpandConstant('{app}\.autostart-initialized'), '1', False);
+    { Inno already ran the setup wizard; skip the in-app first-run wizard. }
+    SaveStringToFile(ExpandConstant('{app}\.setup-wizard-complete'), '1', False);
+  end;
 end;

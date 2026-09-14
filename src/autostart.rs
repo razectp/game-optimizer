@@ -25,15 +25,20 @@ fn normalize_exe_path(exe: PathBuf) -> String {
     exe.to_string_lossy().replace('/', "\\")
 }
 
-/// Path of the first-run marker (install dir or `%LOCALAPPDATA%\GameOptimizer`).
-pub fn initialized_marker_path() -> PathBuf {
+/// Per-user data directory (`%LOCALAPPDATA%\GameOptimizer`, or the exe folder).
+pub fn data_dir() -> PathBuf {
     if let Ok(local) = env::var("LOCALAPPDATA") {
-        return PathBuf::from(local).join("GameOptimizer").join(MARKER_NAME);
+        return PathBuf::from(local).join("GameOptimizer");
     }
     env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|parent| parent.join(MARKER_NAME)))
-        .unwrap_or_else(|| PathBuf::from(MARKER_NAME))
+        .and_then(|exe| exe.parent().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Path of the first-run marker (install dir or `%LOCALAPPDATA%\GameOptimizer`).
+pub fn initialized_marker_path() -> PathBuf {
+    data_dir().join(MARKER_NAME)
 }
 
 fn write_initialized_marker() -> anyhow::Result<()> {
@@ -45,7 +50,8 @@ fn write_initialized_marker() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn initialized_marker_exists() -> bool {
+/// Whether the first-run autostart marker already exists.
+pub fn initialized_marker_exists() -> bool {
     initialized_marker_path().is_file()
 }
 
@@ -123,5 +129,15 @@ mod tests {
     fn already_enabled_does_not_need_first_run_enable() {
         assert!(!should_enable_first_run_default(true, false));
         assert!(!should_enable_first_run_default(true, true));
+    }
+
+    #[test]
+    fn data_dir_is_named_game_optimizer_when_localappdata_is_set() {
+        if env::var_os("LOCALAPPDATA").is_some() {
+            assert_eq!(
+                data_dir().file_name().and_then(|n| n.to_str()),
+                Some("GameOptimizer")
+            );
+        }
     }
 }

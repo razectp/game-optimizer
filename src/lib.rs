@@ -14,6 +14,7 @@ pub mod detect;
 pub mod gui;
 pub mod optimize;
 pub mod report;
+pub mod setup_wizard;
 pub mod win_window;
 
 #[cfg(windows)]
@@ -106,5 +107,28 @@ mod release_packaging {
         );
         assert!(!gui.contains("push_log"));
         assert!(!gui.contains("logs: Vec"));
+    }
+
+    #[test]
+    fn inno_script_is_a_full_setup_wizard() {
+        let iss = include_str!("../installer/GameOptimizer.iss");
+        assert!(iss.contains("DisableWelcomePage=no"));
+        assert!(iss.contains("InfoBeforeFile"));
+        assert!(iss.contains("LicenseFile"));
+        assert!(iss.contains("CreateOutputMsgMemoPage"));
+        assert!(iss.contains("WizardStyle=modern"));
+        assert!(iss.contains("ShowLanguageDialog=yes"));
+        assert!(iss.contains(".setup-wizard-complete"));
+        assert!(iss.contains("wizard-sidebar.bmp"));
+    }
+
+    #[test]
+    fn gui_embeds_first_run_setup_wizard() {
+        let gui = include_str!("gui.rs");
+        assert!(gui.contains("draw_setup_wizard"));
+        assert!(gui.contains("Assistente de configuração"));
+        let wizard = include_str!("setup_wizard.rs");
+        assert!(wizard.contains("Bem-vindo"));
+        assert!(wizard.contains("PAGE_COUNT: usize = 4"));
     }
 }

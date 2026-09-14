@@ -1,0 +1,16 @@
+Licença do Game Optimizer (MIT)
+
+Copyright (c) Game Optimizer
+
+É concedida permissão, gratuitamente, a qualquer pessoa que obtenha uma
+cópia deste software e arquivos de documentação associados, para usar o
+software sem restrição, incluindo sem limitação os direitos de usar,
+copiar, modificar, mesclar, publicar, distribuir, sublicenciar e/ou
+vender cópias do software.
+
+O SOFTWARE É FORNECIDO "COMO ESTÁ", SEM GARANTIA DE QUALQUER TIPO,
+EXPRESSA OU IMPLÍCITA, INCLUINDO MAS NÃO SE LIMITANDO ÀS GARANTIAS DE
+COMERCIALIZAÇÃO, ADEQUAÇÃO A UM DETERMINADO FIM E NÃO VIOLAÇÃO.
+
+O Game Optimizer nunca encerra jogos. A limpeza de arquivos temporários,
+quando usada, atinge apenas a pasta Temp / INetCache do seu usuário.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 — 2026-09-14
+
+- Setup wizard: Inno installer now walks through language, welcome, summary,
+  license, install folder, desktop shortcut, and start-with-Windows.
+- First-run wizard in the GUI (portable builds and `game_optimizer --setup`);
+  skipped after the Inno installer, which writes `.setup-wizard-complete`.
+
 ## 0.4.0 — 2026-09-13
 
 - Release packaging: per-user PowerShell installer (no Rust required), Inno Setup

@@ -17,8 +17,8 @@ fn main() {
     res.set("ProductName", "Game Optimizer");
     res.set("FileDescription", "Game Optimizer");
     res.set("LegalCopyright", "MIT");
-    res.set("ProductVersion", "0.4.0.0");
-    res.set("FileVersion", "0.4.0.0");
+    res.set("ProductVersion", "0.5.0.0");
+    res.set("FileVersion", "0.5.0.0");
     if let Err(err) = res.compile() {
         println!("cargo:warning=windows resource compile skipped: {err}");
     }

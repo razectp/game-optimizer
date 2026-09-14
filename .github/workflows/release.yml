@@ -23,7 +23,7 @@ jobs:
       - name: Copy standalone exe
         shell: pwsh
         run: |
-          $ver = "0.4.0"
+          $ver = "0.5.0"
           Copy-Item -LiteralPath "dist\GameOptimizer\game_optimizer.exe" `
             -Destination "dist\GameOptimizer-$ver.exe" -Force
 
@@ -46,21 +46,23 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Game Optimizer 0.4.0
+          name: Game Optimizer 0.5.0
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
           files: |
-            dist/GameOptimizer-0.4.0-setup.exe
-            dist/GameOptimizer-0.4.0.exe
-            dist/GameOptimizer-0.4.0-windows.zip
+            dist/GameOptimizer-0.5.0-setup.exe
+            dist/GameOptimizer-0.5.0.exe
+            dist/GameOptimizer-0.5.0-windows.zip
           body: |
             Instalador e binário Windows de 64 bits (Windows 10/11).
 
-            **Recomendado:** `GameOptimizer-0.4.0-setup.exe` (Inno Setup, por usuário, sem admin).
+            **Recomendado:** `GameOptimizer-0.5.0-setup.exe` (assistente Inno Setup, por usuário, sem admin).
+            Passos: idioma, boas-vindas, o que será instalado, licença, pasta, atalhos/início com o Windows.
+
             Instala em `%LOCALAPPDATA%\GameOptimizer`, atalhos, início com o Windows e desinstalação em Aplicativos e recursos.
 
-            **Portátil:** `GameOptimizer-0.4.0.exe` ou o zip com `install.ps1`.
+            **Portátil:** `GameOptimizer-0.5.0.exe` ou o zip com `install.ps1` (o app abre um assistente no primeiro uso).
 
             ```powershell
             powershell -ExecutionPolicy Bypass -File .\install.ps1

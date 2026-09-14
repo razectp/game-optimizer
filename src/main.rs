@@ -28,6 +28,10 @@ struct Cli {
     #[arg(long)]
     gui: bool,
 
+    /// Open the first-run setup wizard in the GUI.
+    #[arg(long)]
+    setup: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -81,8 +85,12 @@ fn main() -> anyhow::Result<()> {
     attach_parent_console();
     let cli = Cli::parse();
 
+    if cli.setup {
+        return gui::run(cli.config, true).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
+    }
+
     if cli.gui || cli.command.is_none() {
-        return gui::run(cli.config).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
+        return gui::run(cli.config, false).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
     }
 
     let config = AppConfig::load_or_default(&cli.config)?;
