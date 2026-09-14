@@ -1,5 +1,7 @@
 //! Entry point: GUI by default; CLI when a subcommand is given.
 
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -25,6 +27,10 @@ struct Cli {
     /// Force the graphical interface.
     #[arg(long)]
     gui: bool,
+
+    /// Open the first-run setup wizard in the GUI.
+    #[arg(long)]
+    setup: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -76,10 +82,15 @@ fn apply_cli_overrides(mut config: AppConfig, trim_game_memory: bool) -> AppConf
 }
 
 fn main() -> anyhow::Result<()> {
+    attach_parent_console();
     let cli = Cli::parse();
 
+    if cli.setup {
+        return gui::run(cli.config, true).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
+    }
+
     if cli.gui || cli.command.is_none() {
-        return gui::run(cli.config).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
+        return gui::run(cli.config, false).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
     }
 
     let config = AppConfig::load_or_default(&cli.config)?;
@@ -154,4 +165,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn attach_parent_console() {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+        // SAFETY: best-effort attach so CLI/help still print from a terminal.
+        let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    }
 }

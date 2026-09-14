@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 — 2026-09-14
+
+- Setup wizard: Inno installer now walks through language, welcome, summary,
+  license, install folder, desktop shortcut, and start-with-Windows.
+- First-run wizard in the GUI (portable builds and `game_optimizer --setup`);
+  skipped after the Inno installer, which writes `.setup-wizard-complete`.
+
 ## 0.4.0 — 2026-09-13
 
 - Release packaging: per-user PowerShell installer (no Rust required), Inno Setup
@@ -12,6 +19,8 @@
 - Watch loop no longer blocks Stop; tray left-click restores the window.
 - Autostart opt-out is sticky (installer/GUI write a first-run marker).
 - Temp cleanup refuses `%WINDIR%` fallback roots, not only named system subfolders.
+- Windows release `.exe` uses the GUI subsystem (no console flash; CLI still
+  prints when launched from a terminal).
 
 ## 0.3.0 — 2026-09-13
 

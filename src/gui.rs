@@ -21,6 +21,7 @@ use crate::cache::{self, CacheCleanReport};
 use crate::config::AppConfig;
 use crate::optimize::{optimize_system, OptimizeReport, OptimizeRequest};
 use crate::report::format_mib;
+use crate::setup_wizard::{self, SetupWizard};
 use crate::win_window;
 
 /// Warm amber — primary actions.
@@ -58,12 +59,12 @@ struct TraySignals {
 }
 
 /// Launch the native GUI (blocks until quit).
-pub fn run(config_path: PathBuf) -> eframe::Result<()> {
+pub fn run(config_path: PathBuf, force_setup: bool) -> eframe::Result<()> {
     let icon = tray_rgba_icon();
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 520.0])
-            .with_min_inner_size([680.0, 460.0])
+            .with_inner_size([760.0, 540.0])
+            .with_min_inner_size([680.0, 480.0])
             .with_title(win_window::WINDOW_TITLE)
             .with_icon(eframe_icon()),
         ..Default::default()
@@ -75,7 +76,7 @@ pub fn run(config_path: PathBuf) -> eframe::Result<()> {
         Box::new(move |cc| {
             install_fonts(&cc.egui_ctx);
             style_visuals(&cc.egui_ctx);
-            Ok(Box::new(GuiApp::new(config_path, icon)) as Box<dyn App>)
+            Ok(Box::new(GuiApp::new(config_path, icon, force_setup)) as Box<dyn App>)
         }),
     )
 }
@@ -192,12 +193,17 @@ struct GuiApp {
     ui_tx: Sender<UiCmd>,
     worker_rx: Receiver<WorkerMsg>,
     watch_flag: Arc<AtomicBool>,
+    wizard: Option<SetupWizard>,
 }
 
 impl GuiApp {
-    fn new(config_path: PathBuf, icon: Icon) -> Self {
-        let autostart =
-            autostart::ensure_default_enabled().unwrap_or_else(|_| autostart::is_enabled());
+    fn new(config_path: PathBuf, icon: Icon, force_setup: bool) -> Self {
+        let show_wizard = setup_wizard::should_show(force_setup);
+        let autostart = if show_wizard {
+            autostart::is_enabled() || !autostart::initialized_marker_exists()
+        } else {
+            autostart::ensure_default_enabled().unwrap_or_else(|_| autostart::is_enabled())
+        };
 
         let menu = Menu::new();
         let tray_show = MenuItem::new("Abrir Game Optimizer", true, None);
@@ -250,6 +256,11 @@ impl GuiApp {
             ui_tx,
             worker_rx,
             watch_flag,
+            wizard: if show_wizard {
+                Some(SetupWizard::new(autostart, true))
+            } else {
+                None
+            },
         };
         let _ = app.ui_tx.send(UiCmd::Scan);
         app
@@ -380,14 +391,204 @@ impl App for GuiApp {
                     .inner_margin(egui::Margin::symmetric(20, 16)),
             )
             .show(ui, |ui| {
-                self.draw_header(ui, &ctx);
-                ui.add_space(14.0);
-                self.draw_body(ui, &ctx);
+                if self.wizard.is_some() {
+                    self.draw_setup_wizard(ui);
+                } else {
+                    self.draw_header(ui, &ctx);
+                    ui.add_space(14.0);
+                    self.draw_body(ui, &ctx);
+                }
             });
     }
 }
 
 impl GuiApp {
+    fn finish_setup_wizard(&mut self) {
+        let Some(wizard) = self.wizard.take() else {
+            return;
+        };
+        self.autostart = wizard.autostart;
+        match autostart::set_enabled(wizard.autostart) {
+            Ok(()) => {
+                self.status = if wizard.autostart {
+                    "Vai abrir junto com o Windows.".into()
+                } else {
+                    "Não abre automaticamente com o Windows.".into()
+                };
+            }
+            Err(err) => {
+                self.status = format!("Não foi possível alterar o início: {err}");
+            }
+        }
+        if let Err(err) = setup_wizard::mark_complete() {
+            self.status = format!("Não foi possível gravar o assistente: {err}");
+        }
+        if wizard.start_watching {
+            let _ = self.ui_tx.send(UiCmd::StartWatch {
+                interval: self.watch_interval,
+                trim_game: self.trim_game_memory,
+            });
+        }
+    }
+
+    fn draw_setup_wizard(&mut self, ui: &mut egui::Ui) {
+        let mut finished = false;
+        let mut skipped = false;
+
+        ui.vertical_centered(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Assistente de configuração")
+                    .font(FontId::new(13.0, FontFamily::Proportional))
+                    .color(MUTED),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Game Optimizer")
+                    .font(FontId::new(26.0, FontFamily::Proportional))
+                    .color(TEXT)
+                    .strong(),
+            );
+        });
+
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            let remaining = ui.available_width();
+            ui.add_space(((remaining - 168.0) / 2.0).max(0.0));
+            let page = self.wizard.as_ref().map(|w| w.page).unwrap_or(0);
+            for i in 0..setup_wizard::PAGE_COUNT {
+                let active = i == page;
+                let done = i < page;
+                let color = if active {
+                    ACCENT
+                } else if done {
+                    OK
+                } else {
+                    STROKE
+                };
+                let mark = ui.allocate_response(Vec2::splat(22.0), Sense::hover());
+                ui.painter()
+                    .circle_filled(mark.rect.center(), 9.0, color.gamma_multiply(0.35));
+                ui.painter().circle_filled(
+                    mark.rect.center(),
+                    5.0,
+                    if active || done { color } else { MUTED },
+                );
+                if i + 1 < setup_wizard::PAGE_COUNT {
+                    ui.add_space(8.0);
+                }
+            }
+        });
+
+        ui.add_space(18.0);
+
+        let copy = self
+            .wizard
+            .as_ref()
+            .map(SetupWizard::copy)
+            .unwrap_or(setup_wizard::page_copy(0));
+        let on_prefs = self.wizard.as_ref().map(|w| w.page).unwrap_or(0) == 2;
+
+        egui::Frame::new()
+            .fill(BG_RAISED)
+            .stroke(Stroke::new(1.0, STROKE))
+            .corner_radius(16.0)
+            .inner_margin(egui::Margin::symmetric(22, 20))
+            .show(ui, |ui| {
+                ui.label(RichText::new(copy.title).color(TEXT).size(20.0).strong());
+                ui.add_space(10.0);
+                ui.label(RichText::new(copy.body).color(MUTED).size(14.5));
+
+                if on_prefs {
+                    if let Some(wizard) = self.wizard.as_mut() {
+                        ui.add_space(16.0);
+                        ui.checkbox(
+                            &mut wizard.autostart,
+                            RichText::new("Iniciar com o Windows (recomendado)")
+                                .color(TEXT)
+                                .size(14.0),
+                        );
+                        ui.add_space(6.0);
+                        ui.checkbox(
+                            &mut wizard.start_watching,
+                            RichText::new("Começar a cuidar dos jogos agora")
+                                .color(TEXT)
+                                .size(14.0),
+                        );
+                    }
+                }
+            });
+
+        ui.add_space(20.0);
+        ui.horizontal(|ui| {
+            let can_back = self
+                .wizard
+                .as_ref()
+                .map(SetupWizard::can_go_back)
+                .unwrap_or(false);
+            let is_last = self
+                .wizard
+                .as_ref()
+                .map(SetupWizard::is_last)
+                .unwrap_or(false);
+
+            if ui
+                .add_enabled(
+                    can_back,
+                    egui::Button::new(RichText::new("Voltar").color(TEXT))
+                        .fill(BG_ROW)
+                        .corner_radius(9.0)
+                        .min_size(Vec2::new(110.0, 36.0)),
+                )
+                .clicked()
+            {
+                if let Some(wizard) = self.wizard.as_mut() {
+                    wizard.back();
+                }
+            }
+
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Pular").color(MUTED).size(13.0))
+                        .fill(Color32::TRANSPARENT)
+                        .corner_radius(9.0)
+                        .min_size(Vec2::new(90.0, 36.0)),
+                )
+                .clicked()
+            {
+                skipped = true;
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let next_label = if is_last { "Concluir" } else { "Continuar" };
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(next_label)
+                                .strong()
+                                .size(15.0)
+                                .color(Color32::from_rgb(32, 24, 12)),
+                        )
+                        .fill(ACCENT)
+                        .corner_radius(9.0)
+                        .min_size(Vec2::new(140.0, 36.0)),
+                    )
+                    .clicked()
+                {
+                    if is_last {
+                        finished = true;
+                    } else if let Some(wizard) = self.wizard.as_mut() {
+                        wizard.next();
+                    }
+                }
+            });
+        });
+
+        if skipped || finished {
+            self.finish_setup_wizard();
+        }
+    }
+
     fn draw_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             let mark = ui.allocate_response(Vec2::splat(32.0), Sense::hover());
@@ -654,6 +855,23 @@ impl GuiApp {
                                 self.status = "Limpeza cancelada.".into();
                             }
                         });
+
+                        ui.add_space(10.0);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Assistente de configuração")
+                                        .color(MUTED)
+                                        .size(12.5),
+                                )
+                                .fill(BG_ROW)
+                                .corner_radius(8.0)
+                                .min_size(Vec2::new(ui.available_width(), 32.0)),
+                            )
+                            .clicked()
+                        {
+                            self.wizard = Some(SetupWizard::new(self.autostart, self.watching));
+                        }
                     });
             });
         });
