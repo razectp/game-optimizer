@@ -12,6 +12,8 @@
 - Watch loop no longer blocks Stop; tray left-click restores the window.
 - Autostart opt-out is sticky (installer/GUI write a first-run marker).
 - Temp cleanup refuses `%WINDIR%` fallback roots, not only named system subfolders.
+- Windows release `.exe` uses the GUI subsystem (no console flash; CLI still
+  prints when launched from a terminal).
 
 ## 0.3.0 — 2026-09-13
 
