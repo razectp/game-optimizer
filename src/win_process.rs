@@ -1,7 +1,8 @@
 //! Windows process control adapters (game PIDs only).
 //!
 //! All `unsafe` is confined here and documented. This module never terminates
-//! processes and never mutates non-game targets at the call sites in `optimize`.
+//! processes. The only non-game mutation is browser working-set trim, planned
+//! in `optimize` from the reclaim allowlist.
 
 #![allow(unsafe_code)]
 
