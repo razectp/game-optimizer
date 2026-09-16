@@ -159,7 +159,7 @@ if (-not $InstallDir) {
 }
 
 $ExeName = "game_optimizer.exe"
-$Version = "0.5.2"
+$Version = "0.5.3"
 $Publisher = "Game Optimizer"
 
 if ($Build) {

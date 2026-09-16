@@ -3,7 +3,7 @@
 ; Requires a release binary at ..\target\release\game_optimizer.exe
 
 #define AppName "Game Optimizer"
-#define AppVersion "0.5.2"
+#define AppVersion "0.5.3"
 #define AppPublisher "Game Optimizer"
 #define AppExeName "game_optimizer.exe"
 #define AppMutexName "GameOptimizer"
@@ -131,7 +131,7 @@ Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; Description: "{cm:LaunchPr
 
 [Code]
 const
-  SetupVersion = '0.5.2';
+  SetupVersion = '0.5.3';
   SetupExeName = 'game_optimizer.exe';
 
 var
@@ -301,11 +301,14 @@ begin
   end;
 end;
 
-function TwoArgs(const A, B: String): TArrayOfString;
+function Fmt2(const MsgName, A, B: String): String;
 begin
-  SetArrayLength(Result, 2);
-  Result[0] := A;
-  Result[1] := B;
+  // Replace %1/%2 in custom messages. Do not pass a Pascal array:
+  // a line starting with [ is a new ISS section, and array args
+  // to the format helper are a runtime type mismatch.
+  Result := CustomMessage(MsgName);
+  StringChangeEx(Result, '%1', A, True);
+  StringChangeEx(Result, '%2', B, True);
 end;
 
 function InitializeSetup(): Boolean;
@@ -313,8 +316,8 @@ begin
   Result := True;
   if InstalledIsNewerOrSame then
   begin
-    if MsgBox(FmtMessage(CustomMessage('AlreadyNewer'),
-         TwoArgs(GetInstalledVersion, SetupVersion)), mbConfirmation, MB_YESNO) <> IDYES then
+    if MsgBox(Fmt2('AlreadyNewer', GetInstalledVersion, SetupVersion),
+         mbConfirmation, MB_YESNO) <> IDYES then
     begin
       Result := False;
       Exit;
@@ -338,10 +341,10 @@ begin
   WizardForm.WelcomeLabel1.Caption := CustomMessage('UpgradeWelcomeTitle');
   if Installed <> '' then
     WizardForm.WelcomeLabel2.Caption :=
-      FmtMessage(CustomMessage('UpgradeWelcomeBody'), TwoArgs(Installed, SetupVersion))
+      Fmt2('UpgradeWelcomeBody', Installed, SetupVersion)
   else
     WizardForm.WelcomeLabel2.Caption :=
-      FmtMessage(CustomMessage('UpgradeWelcomeBodyUnknown'), TwoArgs(SetupVersion, SetupVersion));
+      Fmt2('UpgradeWelcomeBodyUnknown', SetupVersion, SetupVersion);
 end;
 
 procedure InitializeWizard;

@@ -21,7 +21,7 @@ if (-not $ScriptDir) {
 $Root = Split-Path -Parent $ScriptDir
 if (-not $Root) { $Root = $ScriptDir }
 
-$Version = "0.5.2"
+$Version = "0.5.3"
 $ExeName = "game_optimizer.exe"
 $CargoToml = Join-Path $Root "Cargo.toml"
 if (-not (Test-Path -LiteralPath $CargoToml)) {

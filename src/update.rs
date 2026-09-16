@@ -10,7 +10,7 @@ const USER_AGENT: &str = concat!("GameOptimizer/", env!("CARGO_PKG_VERSION"));
 /// A newer GitHub Release the user can install.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
-    /// Installed crate version (`0.5.2`).
+    /// Installed crate version (`0.5.3`).
     pub current: String,
     /// Latest release version without a leading `v`.
     pub latest: String,

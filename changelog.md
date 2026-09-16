@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 — 2026-09-16
+
+- Fix Setup crash on upgrade: `Runtime error (at …): Type Mismatch` when
+  the wizard filled the welcome text. Version placeholders are now replaced
+  with `StringChangeEx` instead of passing a Pascal array into the format
+  helper (that type is rejected at runtime on Inno Setup 6.7).
+
 ## 0.5.2 — 2026-09-16
 
 - Setup detects a previous install (Inno or PowerShell) and shows an **update**
