@@ -50,6 +50,35 @@ function Stop-GameOptimizerProcess {
     Start-Sleep -Milliseconds 400
 }
 
+function Request-CloseGameOptimizer {
+    $procs = @(Get-Process -Name "game_optimizer" -ErrorAction SilentlyContinue)
+    if ($procs.Count -eq 0) {
+        return
+    }
+    $choice = "Yes"
+    try {
+        Add-Type -AssemblyName System.Windows.Forms | Out-Null
+        $r = [System.Windows.Forms.MessageBox]::Show(
+            "O Game Optimizer está aberto. Encerrar agora para desinstalar?",
+            "Game Optimizer",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question
+        )
+        if ($r -ne [System.Windows.Forms.DialogResult]::Yes) {
+            $choice = "No"
+        }
+    } catch {
+        $answer = Read-Host "Game Optimizer está aberto. Encerrar agora para desinstalar? (S/N)"
+        if ($answer -notmatch '^[sSyY]') {
+            $choice = "No"
+        }
+    }
+    if ($choice -ne "Yes") {
+        throw "Desinstalação cancelada: feche o Game Optimizer (Sair na bandeja) e tente de novo."
+    }
+    Stop-GameOptimizerProcess
+}
+
 function Remove-ItemIfExists {
     param([string]$Path, [switch]$Recurse)
     if (-not $Path) { return }
@@ -92,7 +121,7 @@ if (-not $FromTemp) {
 Write-Host "Removendo Game Optimizer..."
 
 Set-Location $env:TEMP
-Stop-GameOptimizerProcess
+Request-CloseGameOptimizer
 
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 foreach ($name in @("GameOptimizer", "Game Optimizer", "game_optimizer", "game_optimizer.exe", "GameOptimizer.exe")) {

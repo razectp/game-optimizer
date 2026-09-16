@@ -158,6 +158,21 @@ mod release_packaging {
     }
 
     #[test]
+    fn inno_detects_previous_install_and_asks_before_close() {
+        let iss = include_str!("../installer/GameOptimizer.iss");
+        assert!(iss.contains("function IsUpgrade"));
+        assert!(iss.contains("ConfirmCloseIfRunning"));
+        assert!(iss.contains("AppRunningPrompt"));
+        assert!(iss.contains("AlreadyNewer"));
+        assert!(iss.contains("FindWindowByWindowName"));
+        assert!(iss.contains("DisableDirPage=auto"));
+        assert!(iss.contains("UpgradeWelcomeBody"));
+        let install = include_str!("../installer/install.ps1");
+        assert!(install.contains("Request-CloseGameOptimizer"));
+        assert!(install.contains("Instalação anterior encontrada"));
+    }
+
+    #[test]
     fn single_instance_mutex_is_named() {
         let win = include_str!("win_window.rs");
         assert!(win.contains("GameOptimizerSingleInstance"));

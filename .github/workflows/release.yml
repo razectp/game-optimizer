@@ -23,7 +23,7 @@ jobs:
       - name: Copy standalone exe
         shell: pwsh
         run: |
-          $ver = "0.5.1"
+          $ver = "0.5.2"
           Copy-Item -LiteralPath "dist\GameOptimizer\game_optimizer.exe" `
             -Destination "dist\GameOptimizer-$ver.exe" -Force
 
@@ -46,23 +46,24 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Game Optimizer 0.5.1
+          name: Game Optimizer 0.5.2
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
           files: |
-            dist/GameOptimizer-0.5.1-setup.exe
-            dist/GameOptimizer-0.5.1.exe
-            dist/GameOptimizer-0.5.1-windows.zip
+            dist/GameOptimizer-0.5.2-setup.exe
+            dist/GameOptimizer-0.5.2.exe
+            dist/GameOptimizer-0.5.2-windows.zip
           body: |
             Instalador e binário Windows de 64 bits (Windows 10/11).
 
-            **Recomendado:** `GameOptimizer-0.5.1-setup.exe` (assistente Inno Setup, por usuário, sem admin).
+            **Recomendado:** `GameOptimizer-0.5.2-setup.exe` (assistente Inno Setup, por usuário, sem admin).
             Passos: idioma, boas-vindas, o que será instalado, licença, pasta, atalhos/início com o Windows.
 
             Instala em `%LOCALAPPDATA%\GameOptimizer`, atalhos, início com o Windows e desinstalação em Aplicativos e recursos.
+            Se já houver instalação, o assistente mostra atualização e pede para encerrar o app (a janela sozinha só vai para a bandeja).
 
-            **Portátil:** `GameOptimizer-0.5.1.exe` ou o zip com `install.ps1` (o app abre um assistente no primeiro uso).
+            **Portátil:** `GameOptimizer-0.5.2.exe` ou o zip com `install.ps1` (o app abre um assistente no primeiro uso).
 
             Janela com rolagem (sem precisar esticar), um único início com o Windows, e aviso de atualização no próprio app.
 

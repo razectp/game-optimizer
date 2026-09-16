@@ -42,6 +42,44 @@ function Stop-GameOptimizerProcess {
     Start-Sleep -Milliseconds 400
 }
 
+function Request-CloseGameOptimizer {
+    param([string]$InstallDir)
+    $procs = @(Get-Process -Name "game_optimizer" -ErrorAction SilentlyContinue)
+    if ($procs.Count -eq 0) {
+        return
+    }
+
+    $existing = Test-Path -LiteralPath (Join-Path $InstallDir "game_optimizer.exe")
+    $text = "O Game Optimizer está aberto (pode estar na bandeja). Encerrar agora para continuar?"
+    if ($existing) {
+        $text = "Já existe uma instalação em $InstallDir.`n`nO Game Optimizer está aberto. Encerrar agora para atualizar?"
+    }
+
+    $choice = "Yes"
+    try {
+        Add-Type -AssemblyName System.Windows.Forms | Out-Null
+        $r = [System.Windows.Forms.MessageBox]::Show(
+            $text,
+            "Game Optimizer",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question
+        )
+        if ($r -ne [System.Windows.Forms.DialogResult]::Yes) {
+            $choice = "No"
+        }
+    } catch {
+        $answer = Read-Host "Game Optimizer está aberto. Encerrar agora? (S/N)"
+        if ($answer -notmatch '^[sSyY]') {
+            $choice = "No"
+        }
+    }
+
+    if ($choice -ne "Yes") {
+        throw "Instalação cancelada: feche o Game Optimizer (Sair na bandeja) e tente de novo."
+    }
+    Stop-GameOptimizerProcess
+}
+
 function Find-PrebuiltExe {
     param(
         [string]$RootDir,
@@ -121,7 +159,7 @@ if (-not $InstallDir) {
 }
 
 $ExeName = "game_optimizer.exe"
-$Version = "0.5.1"
+$Version = "0.5.2"
 $Publisher = "Game Optimizer"
 
 if ($Build) {
@@ -174,7 +212,12 @@ Write-Host "Instalando Game Optimizer $Version..."
 Write-Host "  Origem: $SourceExe"
 Write-Host "  Destino: $InstallDir"
 
-Stop-GameOptimizerProcess
+$ExistingExe = Join-Path $InstallDir $ExeName
+if (Test-Path -LiteralPath $ExistingExe) {
+    Write-Host "Instalação anterior encontrada. Os arquivos serão atualizados (games.toml do usuário é mantido)."
+}
+
+Request-CloseGameOptimizer -InstallDir $InstallDir
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $InstalledExe = Join-Path $InstallDir $ExeName

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2 — 2026-09-16
+
+- Setup detects a previous install (Inno or PowerShell) and shows an **update**
+  welcome (old version → new). Reinstalling the same or an older build asks
+  first.
+- If Game Optimizer is running (including the tray), Setup **asks** before
+  closing it. Closing the window is not enough — the app hides to the tray —
+  so the prompt is explicit. Same question on uninstall.
+
 ## 0.5.1 — 2026-09-16
 
 - Window layout scrolls when options expand, so you no longer have to drag the
