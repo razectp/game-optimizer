@@ -261,13 +261,18 @@ begin
   end;
 end;
 
-function InitializeSetup(): Boolean;
+function TwoArgs(const A, B: String): TArrayOfString;
+begin
+  SetArrayLength(Result, 2);
+  Result[0] := A;
+  Result[1] := B;
+end;
 begin
   Result := True;
   if InstalledIsNewerOrSame then
   begin
     if MsgBox(FmtMessage(CustomMessage('AlreadyNewer'),
-         [GetInstalledVersion, SetupVersion]), mbConfirmation, MB_YESNO) <> IDYES then
+         TwoArgs(GetInstalledVersion, SetupVersion)), mbConfirmation, MB_YESNO) <> IDYES then
     begin
       Result := False;
       Exit;
@@ -291,10 +296,10 @@ begin
   WizardForm.WelcomeLabel1.Caption := CustomMessage('UpgradeWelcomeTitle');
   if Installed <> '' then
     WizardForm.WelcomeLabel2.Caption :=
-      FmtMessage(CustomMessage('UpgradeWelcomeBody'), [Installed, SetupVersion])
+      FmtMessage(CustomMessage('UpgradeWelcomeBody'), TwoArgs(Installed, SetupVersion))
   else
     WizardForm.WelcomeLabel2.Caption :=
-      FmtMessage(CustomMessage('UpgradeWelcomeBodyUnknown'), [SetupVersion]);
+      FmtMessage(CustomMessage('UpgradeWelcomeBodyUnknown'), TwoArgs(SetupVersion, SetupVersion));
 end;
 
 procedure InitializeWizard;
