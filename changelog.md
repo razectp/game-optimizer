@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1 — 2026-09-16
+
+- Window layout scrolls when options expand, so you no longer have to drag the
+  window taller to reach buttons.
+- Upgrading over an old install no longer starts two copies at login: autostart
+  is HKCU-only, leftover Run keys / Startup shortcuts are removed, and a
+  single-instance mutex reuses the window that is already open.
+- In-app update check (banner + **Verificar atualização**) downloads the setup
+  installer from GitHub Releases when a newer version exists.
+
 ## 0.5.0 — 2026-09-14
 
 - Setup wizard: Inno installer now walks through language, welcome, summary,

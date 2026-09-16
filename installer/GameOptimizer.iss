@@ -3,7 +3,7 @@
 ; Requires a release binary at ..\target\release\game_optimizer.exe
 
 #define AppName "Game Optimizer"
-#define AppVersion "0.5.0"
+#define AppVersion "0.5.1"
 #define AppPublisher "Game Optimizer"
 #define AppExeName "game_optimizer.exe"
 #define AppMutexName "GameOptimizer"
@@ -143,10 +143,25 @@ begin
     CustomMessage('FeaturesBody'));
 end;
 
+procedure RemoveDuplicateAutostart;
+begin
+  { Old aliases + HKLM copies would start a second instance on login. }
+  RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Game Optimizer');
+  RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'game_optimizer');
+  RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'game_optimizer.exe');
+  RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'GameOptimizer.exe');
+  RegDeleteValue(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Run', 'GameOptimizer');
+  RegDeleteValue(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Game Optimizer');
+  DeleteFile(ExpandConstant('{userstartup}\Game Optimizer.lnk'));
+  DeleteFile(ExpandConstant('{userstartup}\GameOptimizer.lnk'));
+  DeleteFile(ExpandConstant('{userstartup}\game_optimizer.lnk'));
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
+    RemoveDuplicateAutostart;
     SaveStringToFile(ExpandConstant('{app}\.autostart-initialized'), '1', False);
     { Inno already ran the setup wizard; skip the in-app first-run wizard. }
     SaveStringToFile(ExpandConstant('{app}\.setup-wizard-complete'), '1', False);

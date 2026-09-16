@@ -95,7 +95,19 @@ Set-Location $env:TEMP
 Stop-GameOptimizerProcess
 
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-Remove-ItemProperty -Path $RunKey -Name "GameOptimizer" -ErrorAction SilentlyContinue
+foreach ($name in @("GameOptimizer", "Game Optimizer", "game_optimizer", "game_optimizer.exe", "GameOptimizer.exe")) {
+    Remove-ItemProperty -Path $RunKey -Name $name -ErrorAction SilentlyContinue
+}
+$LmRun = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
+if (Test-Path -LiteralPath $LmRun) {
+    foreach ($name in @("GameOptimizer", "Game Optimizer", "game_optimizer", "game_optimizer.exe", "GameOptimizer.exe")) {
+        Remove-ItemProperty -Path $LmRun -Name $name -ErrorAction SilentlyContinue
+    }
+}
+$StartupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
+foreach ($lnk in @("Game Optimizer.lnk", "GameOptimizer.lnk", "game_optimizer.lnk")) {
+    Remove-ItemIfExists -Path (Join-Path $StartupDir $lnk)
+}
 Write-Host "Chave de início automático removida (se existia)."
 
 $ArpKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\GameOptimizer"

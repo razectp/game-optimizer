@@ -22,6 +22,7 @@ use crate::config::AppConfig;
 use crate::optimize::{optimize_system, OptimizeReport, OptimizeRequest};
 use crate::report::format_mib;
 use crate::setup_wizard::{self, SetupWizard};
+use crate::update::{self, UpdateInfo};
 use crate::win_window;
 
 /// Warm amber — primary actions.
@@ -42,6 +43,8 @@ enum WorkerMsg {
     Watching(bool),
     Cache(CacheCleanReport),
     Busy(bool),
+    Update(Result<Option<UpdateInfo>, String>),
+    UpdateDownload(Result<PathBuf, String>),
 }
 
 enum UiCmd {
@@ -50,6 +53,8 @@ enum UiCmd {
     StartWatch { interval: u64, trim_game: bool },
     StopWatch,
     CleanCache,
+    CheckUpdate,
+    InstallUpdate { url: String },
 }
 
 struct TraySignals {
@@ -63,8 +68,8 @@ pub fn run(config_path: PathBuf, force_setup: bool) -> eframe::Result<()> {
     let icon = tray_rgba_icon();
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 540.0])
-            .with_min_inner_size([680.0, 480.0])
+            .with_inner_size([840.0, 640.0])
+            .with_min_inner_size([640.0, 480.0])
             .with_title(win_window::WINDOW_TITLE)
             .with_icon(eframe_icon()),
         ..Default::default()
@@ -194,10 +199,14 @@ struct GuiApp {
     worker_rx: Receiver<WorkerMsg>,
     watch_flag: Arc<AtomicBool>,
     wizard: Option<SetupWizard>,
+    update: Option<UpdateInfo>,
+    update_dismissed: bool,
+    update_busy: bool,
 }
 
 impl GuiApp {
     fn new(config_path: PathBuf, icon: Icon, force_setup: bool) -> Self {
+        autostart::remove_duplicate_entries();
         let show_wizard = setup_wizard::should_show(force_setup);
         let autostart = if show_wizard {
             autostart::is_enabled() || !autostart::initialized_marker_exists()
@@ -261,8 +270,12 @@ impl GuiApp {
             } else {
                 None
             },
+            update: None,
+            update_dismissed: false,
+            update_busy: false,
         };
         let _ = app.ui_tx.send(UiCmd::Scan);
+        let _ = app.ui_tx.send(UiCmd::CheckUpdate);
         app
     }
 
@@ -326,6 +339,43 @@ impl GuiApp {
                     self.cache_armed = false;
                 }
                 WorkerMsg::Busy(busy) => self.busy = busy,
+                WorkerMsg::Update(Ok(Some(info))) => {
+                    self.update_busy = false;
+                    self.status = format!(
+                        "Nova versão {} disponível (você tem {}).",
+                        info.latest, info.current
+                    );
+                    self.update = Some(info);
+                    self.update_dismissed = false;
+                    self.set_tray_tooltip("Game Optimizer — atualização disponível");
+                }
+                WorkerMsg::Update(Ok(None)) => {
+                    self.update_busy = false;
+                    self.update = None;
+                    self.set_tray_tooltip("Game Optimizer");
+                    if self.status.starts_with("Verificando atualização") {
+                        self.status = "Este Game Optimizer já está na última versão.".into();
+                    }
+                }
+                WorkerMsg::Update(Err(err)) => {
+                    self.update_busy = false;
+                    self.status = format!("Não foi possível verificar atualização: {err}");
+                }
+                WorkerMsg::UpdateDownload(Ok(path)) => {
+                    self.update_busy = false;
+                    match update::launch_setup(&path) {
+                        Ok(()) => {
+                            self.status = "Instalador aberto. Feche o app se o setup pedir.".into();
+                        }
+                        Err(err) => {
+                            self.status = format!("Não foi possível abrir o instalador: {err}");
+                        }
+                    }
+                }
+                WorkerMsg::UpdateDownload(Err(err)) => {
+                    self.update_busy = false;
+                    self.status = format!("Download da atualização falhou: {err}");
+                }
             }
         }
     }
@@ -342,6 +392,12 @@ impl GuiApp {
         if self.tray_signals.quit.swap(false, Ordering::SeqCst) {
             self.watch_flag.store(false, Ordering::SeqCst);
             std::process::exit(0);
+        }
+    }
+
+    fn set_tray_tooltip(&self, text: &str) {
+        if let Some(tray) = &self.tray {
+            let _ = tray.set_tooltip(Some(text));
         }
     }
 
@@ -392,11 +448,22 @@ impl App for GuiApp {
             )
             .show(ui, |ui| {
                 if self.wizard.is_some() {
-                    self.draw_setup_wizard(ui);
+                    egui::ScrollArea::vertical()
+                        .id_salt("wizard_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.draw_setup_wizard(ui);
+                        });
                 } else {
                     self.draw_header(ui, &ctx);
-                    ui.add_space(14.0);
-                    self.draw_body(ui, &ctx);
+                    self.draw_update_banner(ui);
+                    ui.add_space(10.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("main_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.draw_body(ui, &ctx);
+                        });
                 }
             });
     }
@@ -589,6 +656,85 @@ impl GuiApp {
         }
     }
 
+    fn draw_update_banner(&mut self, ui: &mut egui::Ui) {
+        if self.update_dismissed {
+            return;
+        }
+        let Some(info) = self.update.clone() else {
+            return;
+        };
+        ui.add_space(10.0);
+        egui::Frame::new()
+            .fill(Color32::from_rgb(64, 48, 28))
+            .stroke(Stroke::new(1.0, ACCENT))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "Nova versão {} disponível — você tem {}.",
+                        info.latest, info.current
+                    ))
+                    .color(ACCENT)
+                    .size(14.0)
+                    .strong(),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let install_label = if self.update_busy {
+                        "Baixando…"
+                    } else {
+                        "Atualizar agora"
+                    };
+                    if ui
+                        .add_enabled(
+                            !self.update_busy,
+                            egui::Button::new(
+                                RichText::new(install_label)
+                                    .color(Color32::from_rgb(32, 24, 12))
+                                    .strong(),
+                            )
+                            .fill(ACCENT)
+                            .corner_radius(8.0)
+                            .min_size(Vec2::new(150.0, 32.0)),
+                        )
+                        .clicked()
+                    {
+                        self.start_update_install(&info);
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("Depois").color(MUTED).size(13.0))
+                                .fill(BG_ROW)
+                                .corner_radius(8.0),
+                        )
+                        .clicked()
+                    {
+                        self.update_dismissed = true;
+                        self.set_tray_tooltip("Game Optimizer");
+                    }
+                });
+            });
+    }
+
+    fn start_update_install(&mut self, info: &UpdateInfo) {
+        self.update_busy = true;
+        if let Some(url) = info.setup_url.clone() {
+            self.status = "Baixando o instalador da nova versão…".into();
+            let _ = self.ui_tx.send(UiCmd::InstallUpdate { url });
+        } else {
+            self.update_busy = false;
+            match update::open_release_page(&info.html_url) {
+                Ok(()) => {
+                    self.status = "Abri a página da versão nova no navegador.".into();
+                }
+                Err(err) => {
+                    self.status = format!("Não foi possível abrir a página da versão: {err}");
+                }
+            }
+        }
+    }
+
     fn draw_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             let mark = ui.allocate_response(Vec2::splat(32.0), Sense::hover());
@@ -605,9 +751,12 @@ impl GuiApp {
                         .strong(),
                 );
                 ui.label(
-                    RichText::new("Seus jogos, mais fluidos — nada é fechado.")
-                        .color(MUTED)
-                        .size(13.0),
+                    RichText::new(format!(
+                        "Seus jogos, mais fluidos — v{}",
+                        env!("CARGO_PKG_VERSION")
+                    ))
+                    .color(MUTED)
+                    .size(13.0),
                 );
             });
 
@@ -657,224 +806,245 @@ impl GuiApp {
     }
 
     fn draw_body(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
-        let available = ui.available_height();
-        ui.horizontal(|ui| {
-            ui.set_min_height(available);
-
-            ui.vertical(|ui| {
-                ui.set_width(ui.available_width() * 0.64 - 8.0);
-                ui.set_min_height(available);
-
-                section_label(ui, "Seus jogos");
-                egui::Frame::new()
-                    .fill(BG_RAISED)
-                    .stroke(Stroke::new(1.0, STROKE))
-                    .corner_radius(14.0)
-                    .inner_margin(12.0)
+        section_label(ui, "Seus jogos");
+        egui::Frame::new()
+            .fill(BG_RAISED)
+            .stroke(Stroke::new(1.0, STROKE))
+            .corner_radius(14.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("games_list")
+                    .max_height(200.0)
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        let list_h = (available - 24.0).max(180.0);
-                        egui::ScrollArea::vertical()
-                            .max_height(list_h)
-                            .auto_shrink([false; 2])
-                            .show(ui, |ui| {
-                                self.draw_games(ui);
-                            });
+                        self.draw_games(ui);
                     });
             });
 
-            ui.add_space(14.0);
-
-            ui.vertical(|ui| {
-                ui.set_width(ui.available_width());
-                ui.set_min_height(available);
-
-                section_label(ui, "Ações");
-                egui::Frame::new()
-                    .fill(BG_RAISED)
-                    .stroke(Stroke::new(1.0, STROKE))
-                    .corner_radius(14.0)
-                    .inner_margin(12.0)
-                    .show(ui, |ui| {
-                        let wide = ui.available_width();
-                        if ui
-                            .add_enabled(
-                                !self.busy,
-                                egui::Button::new(RichText::new("Atualizar lista").color(TEXT))
-                                    .fill(BG_ROW)
-                                    .corner_radius(9.0)
-                                    .min_size(Vec2::new(wide, 34.0)),
-                            )
-                            .clicked()
-                        {
-                            let _ = self.ui_tx.send(UiCmd::Scan);
-                        }
-                        ui.add_space(6.0);
-                        if self.watching {
-                            if ui
-                                .add_sized(
-                                    [wide, 34.0],
-                                    egui::Button::new(RichText::new("Parar por agora").color(TEXT))
-                                        .fill(Color32::from_rgb(78, 44, 36))
-                                        .corner_radius(9.0),
-                                )
-                                .clicked()
-                            {
-                                let _ = self.ui_tx.send(UiCmd::StopWatch);
-                            }
-                        } else if ui
-                            .add_enabled(
-                                !self.busy,
-                                egui::Button::new(RichText::new("Manter otimizado").color(TEXT))
-                                    .fill(BG_ROW)
-                                    .corner_radius(9.0)
-                                    .min_size(Vec2::new(wide, 34.0)),
-                            )
-                            .clicked()
-                        {
-                            let _ = self.ui_tx.send(UiCmd::StartWatch {
-                                interval: self.watch_interval,
-                                trim_game: self.trim_game_memory,
-                            });
-                        }
-                    });
-
-                ui.add_space(12.0);
-                section_label(ui, "Opções");
-                egui::Frame::new()
-                    .fill(BG_RAISED)
-                    .stroke(Stroke::new(1.0, STROKE))
-                    .corner_radius(14.0)
-                    .inner_margin(12.0)
-                    .show(ui, |ui| {
-                        if ui
-                            .checkbox(
-                                &mut self.autostart,
-                                RichText::new("Iniciar com o Windows")
-                                    .color(TEXT)
-                                    .size(13.5),
-                            )
-                            .changed()
-                        {
-                            match autostart::set_enabled(self.autostart) {
-                                Ok(()) => {
-                                    self.status = if self.autostart {
-                                        "Vai abrir junto com o Windows.".into()
-                                    } else {
-                                        "Não abre mais automaticamente.".into()
-                                    };
-                                }
-                                Err(err) => {
-                                    self.status =
-                                        format!("Não foi possível alterar o início: {err}");
-                                }
-                            }
-                        }
-
-                        if self.watching {
-                            ui.add_space(8.0);
-                            ui.label(
-                                RichText::new("Checar a cada (segundos)")
-                                    .color(MUTED)
-                                    .size(12.0),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut self.watch_interval, 15..=120)
-                                    .clamping(egui::SliderClamping::Always),
-                            );
-                        }
-
-                        ui.add_space(8.0);
-                        egui::CollapsingHeader::new(
-                            RichText::new("Mais opções").color(MUTED).size(13.0),
+        ui.add_space(12.0);
+        section_label(ui, "Ações");
+        egui::Frame::new()
+            .fill(BG_RAISED)
+            .stroke(Stroke::new(1.0, STROKE))
+            .corner_radius(14.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                let wide = ui.available_width();
+                if ui
+                    .add_enabled(
+                        !self.busy,
+                        egui::Button::new(RichText::new("Atualizar lista").color(TEXT))
+                            .fill(BG_ROW)
+                            .corner_radius(9.0)
+                            .min_size(Vec2::new(wide, 34.0)),
+                    )
+                    .clicked()
+                {
+                    let _ = self.ui_tx.send(UiCmd::Scan);
+                }
+                ui.add_space(6.0);
+                if self.watching {
+                    if ui
+                        .add_sized(
+                            [wide, 34.0],
+                            egui::Button::new(RichText::new("Parar por agora").color(TEXT))
+                                .fill(Color32::from_rgb(78, 44, 36))
+                                .corner_radius(9.0),
                         )
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            ui.add_space(4.0);
-                            ui.checkbox(
-                                &mut self.trim_game_memory,
-                                RichText::new("Liberar RAM do jogo").color(TEXT).size(13.5),
-                            );
-                            ui.label(
-                                RichText::new(
-                                    "Pode dar uma travadinha. Deixe desligado se não tiver certeza.",
-                                )
-                                .color(WARN)
-                                .size(11.5),
-                            );
+                        .clicked()
+                    {
+                        let _ = self.ui_tx.send(UiCmd::StopWatch);
+                    }
+                } else if ui
+                    .add_enabled(
+                        !self.busy,
+                        egui::Button::new(RichText::new("Manter otimizado").color(TEXT))
+                            .fill(BG_ROW)
+                            .corner_radius(9.0)
+                            .min_size(Vec2::new(wide, 34.0)),
+                    )
+                    .clicked()
+                {
+                    let _ = self.ui_tx.send(UiCmd::StartWatch {
+                        interval: self.watch_interval,
+                        trim_game: self.trim_game_memory,
+                    });
+                }
+            });
 
-                            ui.add_space(10.0);
-                            ui.label(
-                                RichText::new(
-                                    "Limpar pasta Temp do Windows. Não apaga cache de jogos.",
-                                )
-                                .color(MUTED)
-                                .size(11.5),
-                            );
-                            ui.add_space(4.0);
-                            let cache_label = if self.cache_armed {
-                                "Confirmar limpeza"
+        ui.add_space(12.0);
+        section_label(ui, "Opções");
+        egui::Frame::new()
+            .fill(BG_RAISED)
+            .stroke(Stroke::new(1.0, STROKE))
+            .corner_radius(14.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                if ui
+                    .checkbox(
+                        &mut self.autostart,
+                        RichText::new("Iniciar com o Windows")
+                            .color(TEXT)
+                            .size(13.5),
+                    )
+                    .changed()
+                {
+                    match autostart::set_enabled(self.autostart) {
+                        Ok(()) => {
+                            self.status = if self.autostart {
+                                "Vai abrir junto com o Windows.".into()
                             } else {
-                                "Limpar arquivos temporários"
+                                "Não abre mais automaticamente.".into()
                             };
-                            let cache_fill = if self.cache_armed {
-                                Color32::from_rgb(96, 56, 32)
-                            } else {
-                                BG_ROW
-                            };
-                            if ui
-                                .add_enabled(
-                                    !self.busy,
-                                    egui::Button::new(RichText::new(cache_label).color(TEXT))
-                                        .fill(cache_fill)
-                                        .corner_radius(9.0)
-                                        .min_size(Vec2::new(ui.available_width(), 34.0)),
-                                )
-                                .clicked()
-                            {
-                                if self.cache_armed {
-                                    let _ = self.ui_tx.send(UiCmd::CleanCache);
-                                    self.status = "Limpando arquivos temporários…".into();
-                                } else {
-                                    self.cache_armed = true;
-                                    self.status =
-                                        "Toque de novo para confirmar a limpeza da pasta Temp."
-                                            .into();
-                                }
-                            }
-                            if self.cache_armed
-                                && ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new("Cancelar").color(MUTED).size(12.0),
-                                        )
-                                        .fill(Color32::TRANSPARENT),
-                                    )
-                                    .clicked()
-                            {
-                                self.cache_armed = false;
-                                self.status = "Limpeza cancelada.".into();
-                            }
-                        });
+                        }
+                        Err(err) => {
+                            self.status = format!("Não foi possível alterar o início: {err}");
+                        }
+                    }
+                }
+
+                if self.watching {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Checar a cada (segundos)")
+                            .color(MUTED)
+                            .size(12.0),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.watch_interval, 15..=120)
+                            .clamping(egui::SliderClamping::Always),
+                    );
+                }
+
+                ui.add_space(8.0);
+                egui::CollapsingHeader::new(RichText::new("Mais opções").color(MUTED).size(13.0))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.add_space(4.0);
+                        ui.checkbox(
+                            &mut self.trim_game_memory,
+                            RichText::new("Liberar RAM do jogo").color(TEXT).size(13.5),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Pode dar uma travadinha. Deixe desligado se não tiver certeza.",
+                            )
+                            .color(WARN)
+                            .size(11.5),
+                        );
 
                         ui.add_space(10.0);
+                        ui.label(
+                            RichText::new(
+                                "Limpar pasta Temp do Windows. Não apaga cache de jogos.",
+                            )
+                            .color(MUTED)
+                            .size(11.5),
+                        );
+                        ui.add_space(4.0);
+                        let cache_label = if self.cache_armed {
+                            "Confirmar limpeza"
+                        } else {
+                            "Limpar arquivos temporários"
+                        };
+                        let cache_fill = if self.cache_armed {
+                            Color32::from_rgb(96, 56, 32)
+                        } else {
+                            BG_ROW
+                        };
                         if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("Assistente de configuração")
-                                        .color(MUTED)
-                                        .size(12.5),
-                                )
-                                .fill(BG_ROW)
-                                .corner_radius(8.0)
-                                .min_size(Vec2::new(ui.available_width(), 32.0)),
+                            .add_enabled(
+                                !self.busy,
+                                egui::Button::new(RichText::new(cache_label).color(TEXT))
+                                    .fill(cache_fill)
+                                    .corner_radius(9.0)
+                                    .min_size(Vec2::new(ui.available_width(), 34.0)),
                             )
                             .clicked()
                         {
-                            self.wizard = Some(SetupWizard::new(self.autostart, self.watching));
+                            if self.cache_armed {
+                                let _ = self.ui_tx.send(UiCmd::CleanCache);
+                                self.status = "Limpando arquivos temporários…".into();
+                            } else {
+                                self.cache_armed = true;
+                                self.status =
+                                    "Toque de novo para confirmar a limpeza da pasta Temp.".into();
+                            }
+                        }
+                        if self.cache_armed
+                            && ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Cancelar").color(MUTED).size(12.0),
+                                    )
+                                    .fill(Color32::TRANSPARENT),
+                                )
+                                .clicked()
+                        {
+                            self.cache_armed = false;
+                            self.status = "Limpeza cancelada.".into();
                         }
                     });
+
+                ui.add_space(10.0);
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("Assistente de configuração")
+                                .color(MUTED)
+                                .size(12.5),
+                        )
+                        .fill(BG_ROW)
+                        .corner_radius(8.0)
+                        .min_size(Vec2::new(ui.available_width(), 32.0)),
+                    )
+                    .clicked()
+                {
+                    self.wizard = Some(SetupWizard::new(self.autostart, self.watching));
+                }
+
+                ui.add_space(8.0);
+                let update_label = if self.update_busy {
+                    "Verificando…"
+                } else {
+                    "Verificar atualização"
+                };
+                if ui
+                    .add_enabled(
+                        !self.update_busy,
+                        egui::Button::new(RichText::new(update_label).color(TEXT).size(12.5))
+                            .fill(BG_ROW)
+                            .corner_radius(8.0)
+                            .min_size(Vec2::new(ui.available_width(), 32.0)),
+                    )
+                    .clicked()
+                {
+                    self.update_busy = true;
+                    self.status = "Verificando atualização…".into();
+                    let _ = self.ui_tx.send(UiCmd::CheckUpdate);
+                }
+                if let Some(info) = self.update.clone() {
+                    ui.add_space(6.0);
+                    if ui
+                        .add_enabled(
+                            !self.update_busy,
+                            egui::Button::new(
+                                RichText::new(format!("Instalar {} agora", info.latest))
+                                    .color(Color32::from_rgb(32, 24, 12))
+                                    .size(12.5)
+                                    .strong(),
+                            )
+                            .fill(ACCENT)
+                            .corner_radius(8.0)
+                            .min_size(Vec2::new(ui.available_width(), 32.0)),
+                        )
+                        .clicked()
+                    {
+                        self.start_update_install(&info);
+                    }
+                }
             });
-        });
     }
 
     fn draw_games(&self, ui: &mut egui::Ui) {
@@ -1111,6 +1281,14 @@ fn spawn_worker(
                     let report = cache::clean_user_caches();
                     let _ = worker_tx.send(WorkerMsg::Cache(report));
                     let _ = worker_tx.send(WorkerMsg::Busy(false));
+                }
+                Ok(UiCmd::CheckUpdate) => {
+                    let result = update::check_latest().map_err(|err| err.to_string());
+                    let _ = worker_tx.send(WorkerMsg::Update(result));
+                }
+                Ok(UiCmd::InstallUpdate { url }) => {
+                    let result = update::download_setup(&url).map_err(|err| err.to_string());
+                    let _ = worker_tx.send(WorkerMsg::UpdateDownload(result));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if watch_flag.load(Ordering::SeqCst)

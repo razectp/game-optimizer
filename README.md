@@ -18,10 +18,10 @@ if the window was maximized. Start with Windows is enabled by default.
 No Rust toolchain is required. Download a packaged build from
 [GitHub Releases](https://github.com/razectp/game-optimizer/releases):
 
-1. **Setup (recommended):** run `GameOptimizer-0.5.0-setup.exe` and follow the
+1. **Setup (recommended):** run `GameOptimizer-0.5.1-setup.exe` and follow the
    setup wizard (language, welcome, license, folder, shortcuts).
-2. **Portable:** run `GameOptimizer-0.5.0.exe`, or extract
-   `GameOptimizer-0.5.0-windows.zip` and install:
+2. **Portable:** run `GameOptimizer-0.5.1.exe`, or extract
+   `GameOptimizer-0.5.1-windows.zip` and install:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -45,6 +45,7 @@ powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\GameOptimizer\uninst
 
 The Inno installer is a full setup wizard (no admin). Portable launches show a
 first-run wizard in the app; reopen it with `--setup` or **Mais opções**.
+The GUI checks GitHub Releases for updates and can download the setup installer.
 
 ```powershell
 .\target\release\game_optimizer.exe --setup

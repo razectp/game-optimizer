@@ -12,6 +12,7 @@ use game_optimizer::config::AppConfig;
 use game_optimizer::gui;
 use game_optimizer::optimize::{optimize_system, OptimizeRequest};
 use game_optimizer::report::render_report;
+use game_optimizer::win_window;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -85,12 +86,12 @@ fn main() -> anyhow::Result<()> {
     attach_parent_console();
     let cli = Cli::parse();
 
-    if cli.setup {
-        return gui::run(cli.config, true).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
-    }
-
-    if cli.gui || cli.command.is_none() {
-        return gui::run(cli.config, false).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
+    if cli.setup || cli.gui || cli.command.is_none() {
+        if !win_window::try_become_single_instance() {
+            let _ = win_window::restore_main_window(false);
+            return Ok(());
+        }
+        return gui::run(cli.config, cli.setup).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
     }
 
     let config = AppConfig::load_or_default(&cli.config)?;

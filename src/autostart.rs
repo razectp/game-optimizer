@@ -9,14 +9,29 @@ use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 const APP_NAME: &str = "GameOptimizer";
 const MARKER_NAME: &str = ".autostart-initialized";
 
-/// Build an auto-launch handle for the current executable.
+/// Extra Run-key names left by older builds or auto-launch Dynamic mode.
+#[cfg_attr(not(windows), allow(dead_code))]
+const LEFTOVER_RUN_NAMES: &[&str] = &[
+    "Game Optimizer",
+    "game_optimizer",
+    "game_optimizer.exe",
+    "GameOptimizer.exe",
+];
+
+/// Build an auto-launch handle for the current executable (HKCU only).
 pub fn builder_for_current_exe() -> anyhow::Result<AutoLaunch> {
     let exe = env::current_exe()?;
     let path = normalize_exe_path(exe);
-    AutoLaunchBuilder::new()
+    let mut builder = AutoLaunchBuilder::new();
+    builder
         .set_app_name(APP_NAME)
         .set_app_path(&path)
-        .set_args(&["--gui"])
+        .set_args(&["--gui"]);
+    #[cfg(windows)]
+    {
+        builder.set_windows_enable_mode(auto_launch::WindowsEnableMode::CurrentUser);
+    }
+    builder
         .build()
         .map_err(|err| anyhow::anyhow!("auto-launch setup failed: {err}"))
 }
@@ -63,8 +78,14 @@ pub fn should_enable_first_run_default(currently_enabled: bool, initialized: boo
     !currently_enabled && !initialized
 }
 
+/// Drop leftover Run keys / Startup shortcuts so Windows starts the app once.
+pub fn remove_duplicate_entries() {
+    platform::remove_duplicate_entries();
+}
+
 /// Enable or disable start-with-Windows.
 pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
+    remove_duplicate_entries();
     let launch = builder_for_current_exe()?;
     if enabled {
         launch
@@ -89,6 +110,7 @@ pub fn is_enabled() -> bool {
 
 /// Enable auto-start on first GUI launch when not configured yet.
 pub fn ensure_default_enabled() -> anyhow::Result<bool> {
+    remove_duplicate_entries();
     let launch = builder_for_current_exe()?;
     let enabled = launch.is_enabled().unwrap_or(false);
     if enabled {
@@ -103,6 +125,60 @@ pub fn ensure_default_enabled() -> anyhow::Result<bool> {
         .map_err(|err| anyhow::anyhow!("failed to enable default auto-start: {err}"))?;
     let _ = write_initialized_marker();
     Ok(true)
+}
+
+#[cfg(windows)]
+mod platform {
+    use super::{APP_NAME, LEFTOVER_RUN_NAMES};
+    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+
+    pub fn remove_duplicate_entries() {
+        remove_startup_shortcuts();
+        for name in LEFTOVER_RUN_NAMES {
+            delete_run_value("HKCU", name);
+            delete_run_value("HKLM", name);
+        }
+        // Never keep a machine-wide copy: Inno + GUI both belong in HKCU.
+        delete_run_value("HKLM", APP_NAME);
+    }
+
+    fn delete_run_value(hive: &str, name: &str) {
+        let key = format!(r"{hive}\Software\Microsoft\Windows\CurrentVersion\Run");
+        let _ = Command::new("reg.exe")
+            .args(["delete", &key, "/v", name, "/f"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    fn remove_startup_shortcuts() {
+        let Some(dir) = startup_dir() else {
+            return;
+        };
+        for name in [
+            "Game Optimizer.lnk",
+            "GameOptimizer.lnk",
+            "game_optimizer.lnk",
+        ] {
+            let path = dir.join(name);
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    fn startup_dir() -> Option<PathBuf> {
+        env::var_os("APPDATA").map(|appdata| {
+            PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs\Startup")
+        })
+    }
+}
+
+#[cfg(not(windows))]
+mod platform {
+    pub fn remove_duplicate_entries() {}
 }
 
 #[cfg(test)]
@@ -129,6 +205,13 @@ mod tests {
     fn already_enabled_does_not_need_first_run_enable() {
         assert!(!should_enable_first_run_default(true, false));
         assert!(!should_enable_first_run_default(true, true));
+    }
+
+    #[test]
+    fn leftover_run_names_cover_old_aliases() {
+        assert!(LEFTOVER_RUN_NAMES.contains(&"Game Optimizer"));
+        assert!(LEFTOVER_RUN_NAMES.contains(&"game_optimizer"));
+        assert!(!LEFTOVER_RUN_NAMES.contains(&"GameOptimizer"));
     }
 
     #[test]

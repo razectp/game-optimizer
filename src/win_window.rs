@@ -56,13 +56,18 @@ pub fn is_main_window_maximized() -> Option<bool> {
     imp::is_main_window_maximized()
 }
 
+/// Take the single-instance mutex. `false` means another copy is already running.
+pub fn try_become_single_instance() -> bool {
+    imp::try_become_single_instance()
+}
+
 #[cfg(windows)]
 mod imp {
     use super::{restore_show_command, RestoreShowCommand, WINDOW_TITLE};
 
     use windows::core::HSTRING;
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::Foundation::{GetLastError, HWND};
+    use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, FindWindowW, GetForegroundWindow, GetWindowPlacement,
         GetWindowThreadProcessId, IsIconic, IsZoomed, SetForegroundWindow, SetWindowPlacement,
@@ -80,6 +85,22 @@ mod imp {
         let hwnd = find_hwnd()?;
         // SAFETY: hwnd returned by FindWindowW for our titled window.
         Some(unsafe { IsZoomed(hwnd) }.as_bool())
+    }
+
+    /// Named mutex so login items cannot start two GUIs.
+    pub fn try_become_single_instance() -> bool {
+        use windows::core::w;
+        use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+
+        // SAFETY: process-lifetime mutex; handle is intentionally leaked.
+        let handle = unsafe { CreateMutexW(None, true, w!("Local\\GameOptimizerSingleInstance")) };
+        match handle {
+            Ok(_) => {
+                let already = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+                !already
+            }
+            Err(_) => true,
+        }
     }
 
     pub fn hide_main_window() -> bool {
@@ -159,6 +180,10 @@ mod imp {
     pub fn is_main_window_maximized() -> Option<bool> {
         None
     }
+
+    pub fn try_become_single_instance() -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -212,5 +237,6 @@ mod tests {
         let _ = restore_main_window(true);
         let _ = hide_main_window();
         let _ = is_main_window_maximized();
+        let _ = try_become_single_instance();
     }
 }

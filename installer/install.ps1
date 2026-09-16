@@ -121,7 +121,7 @@ if (-not $InstallDir) {
 }
 
 $ExeName = "game_optimizer.exe"
-$Version = "0.5.0"
+$Version = "0.5.1"
 $Publisher = "Game Optimizer"
 
 if ($Build) {
@@ -198,6 +198,21 @@ Copy-Item -LiteralPath $UninstallSrc -Destination (Join-Path $InstallDir "uninst
 Set-Content -LiteralPath (Join-Path $InstallDir ".autostart-initialized") -Value "1" -Encoding ASCII
 
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+foreach ($extraName in @("Game Optimizer", "game_optimizer", "game_optimizer.exe", "GameOptimizer.exe")) {
+    Remove-ItemProperty -Path $RunKey -Name $extraName -ErrorAction SilentlyContinue
+}
+$LmRun = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
+if (Test-Path -LiteralPath $LmRun) {
+    foreach ($extraName in @("GameOptimizer", "Game Optimizer", "game_optimizer", "game_optimizer.exe", "GameOptimizer.exe")) {
+        Remove-ItemProperty -Path $LmRun -Name $extraName -ErrorAction SilentlyContinue
+    }
+}
+$StartupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
+foreach ($lnk in @("Game Optimizer.lnk", "GameOptimizer.lnk", "game_optimizer.lnk")) {
+    $p = Join-Path $StartupDir $lnk
+    if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+}
+
 $autostartOn = -not $NoAutostart
 if ($autostartOn) {
     Set-ItemProperty -Path $RunKey -Name "GameOptimizer" -Value "`"$InstalledExe`" --gui"

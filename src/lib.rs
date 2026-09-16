@@ -15,6 +15,7 @@ pub mod gui;
 pub mod optimize;
 pub mod report;
 pub mod setup_wizard;
+pub mod update;
 pub mod win_window;
 
 #[cfg(windows)]
@@ -130,5 +131,44 @@ mod release_packaging {
         let wizard = include_str!("setup_wizard.rs");
         assert!(wizard.contains("Bem-vindo"));
         assert!(wizard.contains("PAGE_COUNT: usize = 4"));
+    }
+
+    #[test]
+    fn gui_scrolls_instead_of_forcing_window_height() {
+        let gui = include_str!("gui.rs");
+        assert!(gui.contains("id_salt(\"main_scroll\")"));
+        assert!(!gui.contains("ui.set_min_height(available)"));
+        assert!(gui.contains("Verificar atualização"));
+    }
+
+    #[test]
+    fn autostart_stays_on_current_user_run_key() {
+        let autostart = include_str!("autostart.rs");
+        assert!(autostart.contains("WindowsEnableMode::CurrentUser"));
+        assert!(autostart.contains("remove_duplicate_entries"));
+        assert!(autostart.contains("HKLM"));
+    }
+
+    #[test]
+    fn inno_strips_duplicate_autostart_on_upgrade() {
+        let iss = include_str!("../installer/GameOptimizer.iss");
+        assert!(iss.contains("RemoveDuplicateAutostart"));
+        assert!(iss.contains("ssPostInstall"));
+        assert!(iss.contains("Game Optimizer.lnk"));
+    }
+
+    #[test]
+    fn single_instance_mutex_is_named() {
+        let win = include_str!("win_window.rs");
+        assert!(win.contains("GameOptimizerSingleInstance"));
+        assert!(win.contains("try_become_single_instance"));
+    }
+
+    #[test]
+    fn update_module_targets_github_releases() {
+        let update = include_str!("update.rs");
+        assert!(update.contains("releases/latest"));
+        assert!(update.contains("-setup.exe"));
+        assert!(update.contains("curl"));
     }
 }
