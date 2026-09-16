@@ -135,7 +135,9 @@ var
 
 function InnoUninstallKey: String;
 begin
-  Result := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{E8C3A91F-6B2D-4F70-9A15-3C7E8D4B2A10}_is1';
+  { Braces via Chr so ISPP does not treat the AppId as a constant. }
+  Result := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' +
+    Chr(123) + 'E8C3A91F-6B2D-4F70-9A15-3C7E8D4B2A10}_is1';
 end;
 
 function PsUninstallKey: String;
