@@ -130,12 +130,16 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: 
 Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+const
+  SetupVersion = '0.5.2';
+  SetupExeName = 'game_optimizer.exe';
+
 var
   FeaturesPage: TOutputMsgMemoWizardPage;
 
 function InnoUninstallKey: String;
 begin
-  { Braces via Chr so ISPP does not treat the AppId as a constant. }
+  // Braces via Chr so Inno does not treat the AppId as a constant.
   Result := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' +
     Chr(123) + 'E8C3A91F-6B2D-4F70-9A15-3C7E8D4B2A10}_is1';
 end;
@@ -171,7 +175,7 @@ begin
   Result :=
     RegKeyExists(HKCU, InnoUninstallKey) or
     RegKeyExists(HKCU, PsUninstallKey) or
-    FileExists(AddBackslash(PreviousInstallDir) + '{#AppExeName}');
+    FileExists(AddBackslash(PreviousInstallDir) + SetupExeName);
 end;
 
 function InstalledIsNewerOrSame: Boolean;
@@ -185,7 +189,7 @@ begin
     Exit;
   if not StrToPackedVersion(Installed, InstalledPacked) then
     Exit;
-  if not StrToPackedVersion('{#AppVersion}', SetupPacked) then
+  if not StrToPackedVersion(SetupVersion, SetupPacked) then
     Exit;
   Result := ComparePackedVersion(InstalledPacked, SetupPacked) >= 0;
 end;
@@ -263,7 +267,7 @@ begin
   if InstalledIsNewerOrSame then
   begin
     if MsgBox(FmtMessage(CustomMessage('AlreadyNewer'),
-         [GetInstalledVersion, '{#AppVersion}']), mbConfirmation, MB_YESNO) <> IDYES then
+         [GetInstalledVersion, SetupVersion]), mbConfirmation, MB_YESNO) <> IDYES then
     begin
       Result := False;
       Exit;
@@ -287,10 +291,10 @@ begin
   WizardForm.WelcomeLabel1.Caption := CustomMessage('UpgradeWelcomeTitle');
   if Installed <> '' then
     WizardForm.WelcomeLabel2.Caption :=
-      FmtMessage(CustomMessage('UpgradeWelcomeBody'), [Installed, '{#AppVersion}'])
+      FmtMessage(CustomMessage('UpgradeWelcomeBody'), [Installed, SetupVersion])
   else
     WizardForm.WelcomeLabel2.Caption :=
-      FmtMessage(CustomMessage('UpgradeWelcomeBodyUnknown'), ['{#AppVersion}']);
+      FmtMessage(CustomMessage('UpgradeWelcomeBodyUnknown'), [SetupVersion]);
 end;
 
 procedure InitializeWizard;
@@ -319,7 +323,7 @@ end;
 
 procedure RemoveDuplicateAutostart;
 begin
-  { Old aliases + HKLM copies would start a second instance on login. }
+  // Old aliases + HKLM copies would start a second instance on login.
   RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Game Optimizer');
   RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'game_optimizer');
   RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'game_optimizer.exe');
@@ -335,7 +339,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
   begin
-    { Files in use: CloseApplications already asked; force-close leftovers. }
+    // Files in use: CloseApplications already asked; force-close leftovers.
     if IsAppRunning then
       CloseAppIfRunning;
   end;
@@ -343,7 +347,7 @@ begin
   begin
     RemoveDuplicateAutostart;
     SaveStringToFile(ExpandConstant('{app}\.autostart-initialized'), '1', False);
-    { Inno already ran the setup wizard; skip the in-app first-run wizard. }
+    // Inno already ran the setup wizard; skip the in-app first-run wizard.
     SaveStringToFile(ExpandConstant('{app}\.setup-wizard-complete'), '1', False);
   end;
 end;
