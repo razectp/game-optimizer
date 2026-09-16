@@ -178,20 +178,60 @@ begin
     FileExists(AddBackslash(PreviousInstallDir) + SetupExeName);
 end;
 
+function NextVersionPart(var S: String): Integer;
+var
+  DotPos: Integer;
+  Piece: String;
+begin
+  // Dotted X.Y.Z compare; Inno 6.7 has no packed-version helpers.
+  DotPos := Pos('.', S);
+  if DotPos = 0 then
+  begin
+    Piece := S;
+    S := '';
+  end
+  else
+  begin
+    Piece := Copy(S, 1, DotPos - 1);
+    S := Copy(S, DotPos + 1, Length(S));
+  end;
+  Result := StrToIntDef(Piece, 0);
+end;
+
+function CompareDottedVersion(const Left, Right: String): Integer;
+var
+  A, B: String;
+  I, L, R: Integer;
+begin
+  A := Left;
+  B := Right;
+  Result := 0;
+  for I := 1 to 3 do
+  begin
+    L := NextVersionPart(A);
+    R := NextVersionPart(B);
+    if L > R then
+    begin
+      Result := 1;
+      Exit;
+    end;
+    if L < R then
+    begin
+      Result := -1;
+      Exit;
+    end;
+  end;
+end;
+
 function InstalledIsNewerOrSame: Boolean;
 var
-  InstalledPacked, SetupPacked: Int64;
   Installed: String;
 begin
   Result := False;
   Installed := GetInstalledVersion;
   if Installed = '' then
     Exit;
-  if not StrToPackedVersion(Installed, InstalledPacked) then
-    Exit;
-  if not StrToPackedVersion(SetupVersion, SetupPacked) then
-    Exit;
-  Result := ComparePackedVersion(InstalledPacked, SetupPacked) >= 0;
+  Result := CompareDottedVersion(Installed, SetupVersion) >= 0;
 end;
 
 function IsAppRunning: Boolean;
@@ -267,6 +307,8 @@ begin
   Result[0] := A;
   Result[1] := B;
 end;
+
+function InitializeSetup(): Boolean;
 begin
   Result := True;
   if InstalledIsNewerOrSame then
