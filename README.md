@@ -1,8 +1,9 @@
 # Game Optimizer (GPC)
 
 Windows app that applies a **Game Performance Contract** to running games.
-Never closes games. Large non-game apps (e.g. Chrome) can be trimmed to free
-RAM; editors like Cursor are left alone by default.
+Never closes games. Large **browsers** (Chrome, Edge, Firefox, …) can be
+trimmed to free RAM; FFmpeg, OBS, editors like Cursor, and other apps are
+left alone by default.
 
 **Default launch opens the GUI.** Closing or minimizing the window sends the
 app to the system tray. Click the tray icon (or *Abrir*) to restore, including

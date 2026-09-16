@@ -8,6 +8,9 @@
 - If Game Optimizer is running (including the tray), Setup **asks** before
   closing it. Closing the window is not enough — the app hides to the tray —
   so the prompt is explicit. Same question on uninstall.
+- Non-game memory trim is **browsers only** (Chrome, Edge, Firefox, …). FFmpeg,
+  OBS, Premiere and other large apps are never emptied — `EmptyWorkingSet` on
+  an encoder pages its RAM to disk and can stall video export.
 
 ## 0.5.1 — 2026-09-16
 
@@ -25,9 +28,6 @@
   license, install folder, desktop shortcut, and start-with-Windows.
 - First-run wizard in the GUI (portable builds and `game_optimizer --setup`);
   skipped after the Inno installer, which writes `.setup-wizard-complete`.
-- Non-game memory trim is **browsers only** (Chrome, Edge, Firefox, …). FFmpeg,
-  OBS, Premiere and other large apps are never emptied — `EmptyWorkingSet` on
-  an encoder pages its RAM to disk and can stall video export.
 
 ## 0.4.0 — 2026-09-13
 
