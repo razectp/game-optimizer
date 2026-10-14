@@ -3,7 +3,7 @@
 ; Requires a release binary at ..\target\release\game_optimizer.exe
 
 #define AppName "Game Optimizer"
-#define AppVersion "0.6.1"
+#define AppVersion "0.6.2"
 #define AppPublisher "Game Optimizer"
 #define AppExeName "game_optimizer.exe"
 #define AppMutexName "GameOptimizer"

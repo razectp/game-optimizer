@@ -161,12 +161,19 @@ fn collect_tcp_connections(target_pids: &HashSet<u32>, out: &mut Vec<ProcessConn
             continue;
         }
 
+        // Ignore listening, closed, or time-wait sockets
+        if row.state == 1 || row.state == 2 || row.state == 11 {
+            continue;
+        }
+
         let remote_ip = Ipv4Addr::from(u32::from_be(row.remote_addr));
         let remote_port = u16::from_be((row.remote_port & 0xFFFF) as u16);
         let local_port = u16::from_be((row.local_port & 0xFFFF) as u16);
 
-        // Filter out non-routable / loopback addresses
-        if is_routable_game_ip(&remote_ip) {
+        // Filter out non-routable IPs and web/auth/CDN ports (80, 443, 8080, 8443)
+        // Web logins (Google OAuth, Apple ID, WeMade auth) MUST stay on the native local connection
+        // to prevent login page freezes, OAuth verification failures, and "reconnect" errors.
+        if is_game_port(remote_port) && is_routable_game_ip(&remote_ip) {
             out.push(ProcessConnection {
                 pid: row.owning_pid,
                 protocol: "TCP",
@@ -176,6 +183,14 @@ fn collect_tcp_connections(target_pids: &HashSet<u32>, out: &mut Vec<ProcessConn
             });
         }
     }
+}
+
+/// Check if a network port is a dedicated game server port.
+/// Web ports (80, 443, 8080, 8443) and DNS (53) are excluded because they carry
+/// web logins (Google OAuth, Apple ID, WeMade auth), patch CDNs, and browser assets.
+/// Routing or resetting web ports causes OAuth disconnects, login screen freezes, and CDN bandwidth waste.
+pub fn is_game_port(port: u16) -> bool {
+    !matches!(port, 53 | 80 | 443 | 8080 | 8443)
 }
 
 fn collect_udp_connections(target_pids: &HashSet<u32>, _out: &mut Vec<ProcessConnection>) {

@@ -2040,12 +2040,13 @@ fn spawn_worker(
         let mut last_scan = Instant::now();
         let mut last_optimize = Instant::now();
         let mut prev_game_count = 0usize;
+        let mut active_game_pids: Vec<u32> = Vec::new();
+        let mut last_fast_tunnel_sync = Instant::now();
 
         let sync_tunnel = |mgr: &mut crate::tunnel::TunnelManager,
-                           report: &OptimizeReport,
-                           tx: &Sender<WorkerMsg>| {
-            let pids: Vec<u32> = report.games.iter().map(|g| g.pid).collect();
-            let pass = mgr.process_game_pids(&pids);
+                               pids: &[u32],
+                               tx: &Sender<WorkerMsg>| {
+            let pass = mgr.process_game_pids(pids);
             if pass.fallback_bypassed {
                 let _ = tx.send(WorkerMsg::Log(
                     "⚠️ [Túnel VPS] Falha na conexão com a VPS detectada! Fallback automático ativado (tráfego direto via operadora para evitar queda do jogo)".to_string(),
@@ -2075,7 +2076,7 @@ fn spawn_worker(
             // Heartbeat: wake up egui event loop so tray events & worker msgs are processed while hidden
             ctx.request_repaint();
 
-            match ui_rx.recv_timeout(Duration::from_millis(200)) {
+            match ui_rx.recv_timeout(Duration::from_millis(150)) {
                 Ok(UiCmd::Scan) => {
                     let config = AppConfig::load_or_default(&config_path).unwrap_or_default();
                     let report = optimize_system(&OptimizeRequest {
@@ -2083,11 +2084,12 @@ fn spawn_worker(
                         dry_run: true,
                     });
                     prev_game_count = report.games.len();
+                    active_game_pids = report.games.iter().map(|g| g.pid).collect();
                     let _ = worker_tx.send(WorkerMsg::Log(format!(
                         "Scan: {} jogo(s) monitorado(s).",
                         report.games.len()
                     )));
-                    sync_tunnel(&mut tunnel_mgr, &report, &worker_tx);
+                    sync_tunnel(&mut tunnel_mgr, &active_game_pids, &worker_tx);
                     let _ = worker_tx.send(WorkerMsg::Report(report));
                     last_scan = Instant::now();
                 }
@@ -2100,13 +2102,14 @@ fn spawn_worker(
                         dry_run: false,
                     });
                     prev_game_count = report.games.len();
+                    active_game_pids = report.games.iter().map(|g| g.pid).collect();
                     let ok = report.results.iter().filter(|r| r.ok).count();
                     let fail = report.results.iter().filter(|r| !r.ok).count();
                     let _ = worker_tx.send(WorkerMsg::Log(format!(
                         "Otimização: {ok} ok, {fail} falha(s), {} jogo(s).",
                         report.games.len()
                     )));
-                    sync_tunnel(&mut tunnel_mgr, &report, &worker_tx);
+                    sync_tunnel(&mut tunnel_mgr, &active_game_pids, &worker_tx);
                     let _ = worker_tx.send(WorkerMsg::Report(report));
                     last_optimize = Instant::now();
                     last_scan = Instant::now();
@@ -2156,7 +2159,16 @@ fn spawn_worker(
                     let _ = worker_tx.send(WorkerMsg::Tunnel(tunnel_mgr.status()));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Continuous automatic monitoring for running games & tunnel sync every 2 seconds
+                    // Fast socket sync loop: Every 150ms when games are active,
+                    // catch new game server connections instantaneously!
+                    if !active_game_pids.is_empty()
+                        && last_fast_tunnel_sync.elapsed() >= Duration::from_millis(150)
+                    {
+                        last_fast_tunnel_sync = Instant::now();
+                        sync_tunnel(&mut tunnel_mgr, &active_game_pids, &worker_tx);
+                    }
+
+                    // Periodic system scan every 2 seconds to detect new/closed processes
                     if last_scan.elapsed() >= Duration::from_secs(2) {
                         last_scan = Instant::now();
                         let mut config =
@@ -2180,9 +2192,9 @@ fn spawn_worker(
                             )));
                         }
 
-                        // Sync tunnel if games are currently active, or if games were running and closed
+                        active_game_pids = report.games.iter().map(|g| g.pid).collect();
                         if !report.games.is_empty() || prev_game_count > 0 {
-                            sync_tunnel(&mut tunnel_mgr, &report, &worker_tx);
+                            sync_tunnel(&mut tunnel_mgr, &active_game_pids, &worker_tx);
                             let _ = worker_tx.send(WorkerMsg::Report(report.clone()));
                         }
                         prev_game_count = report.games.len();

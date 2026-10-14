@@ -151,6 +151,15 @@ fn delete_host_route(target_ip: Ipv4Addr) -> Result<(), String> {
     Ok(())
 }
 
+/// Clean up any leftover routes in Windows routing table that point to the given tunnel gateway.
+/// Useful on startup and shutdown to purge any orphaned host routes left behind by previous crashes or runs.
+pub fn cleanup_stale_gateway_routes(gateway: Ipv4Addr) {
+    let _ = Command::new("route")
+        .args(["delete", "*", &gateway.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

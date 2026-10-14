@@ -79,6 +79,7 @@ impl TunnelManager {
         let mut route_mgr = RouteManager::new();
         if let Ok(gw) = config.tunnel_gateway.trim().parse::<Ipv4Addr>() {
             route_mgr.set_gateway(gw);
+            crate::tunnel::routes::cleanup_stale_gateway_routes(gw);
         }
 
         Self {
@@ -241,17 +242,24 @@ impl TunnelManager {
         // 5. If and ONLY IF the tunnel is verified Healthy, route game connections through the tunnel!
         if self.health == TunnelHealth::Healthy {
             let connections = find_game_remote_ips(&current_set);
+            let endpoint_ip = self.config.resolve_endpoint_ip();
 
             for conn in connections {
+                if let Some(ep_ip) = endpoint_ip {
+                    if conn.remote_ip == ep_ip {
+                        continue;
+                    }
+                }
+
                 match self.route_mgr.add_game_route(conn.pid, conn.remote_ip) {
                     Ok(newly_added) => {
                         if newly_added {
                             report.newly_routed.push(conn.clone());
-                            // If this was an already-established TCP connection, reset it
-                            // so the game client immediately reconnects via the new tunnel route.
-                            if conn.protocol == "TCP" {
-                                crate::tunnel::sockets::reset_tcp_connection(conn.pid, conn.remote_ip);
-                            }
+                            // NOTE: We do NOT reset active TCP connections here.
+                            // Resetting in-flight TCP connections disrupts active game logins (e.g. MIR4),
+                            // causing game clients to display "reconnect" errors and freeze loading.
+                            // The host route is active; subsequent packets and all new connections
+                            // will naturally flow through the optimized tunnel route from the start.
                         }
                         self.active_connections
                             .entry(conn.pid)
@@ -313,6 +321,9 @@ impl TunnelManager {
             engine.stop();
         }
         self.route_mgr.cleanup_all();
+        if let Ok(gw) = self.config.tunnel_gateway.trim().parse::<Ipv4Addr>() {
+            crate::tunnel::routes::cleanup_stale_gateway_routes(gw);
+        }
         self.health = TunnelHealth::Idle;
         self.last_known_pids.clear();
         self.active_connections.clear();

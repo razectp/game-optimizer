@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.2 — 2026-10-14
+
+- **Instant Game Socket Routing & Anti-Freeze Webview/OAuth Protection**:
+  - Excluded web authentication, OAuth, and CDN ports (`80`, `443`, `8080`, `8443`, `53`) from tunnel interception. Embedded login webviews (Google OAuth, WeMade Auth, Steam, Epic) now establish directly and smoothly without interruptions or "Reconnect" errors.
+  - Eliminated disruptive mid-flight TCP socket resets (`SetTcpEntry`) on newly added routes. Connections transition cleanly without aborting active HTTP/TLS handshakes.
+  - Accelerated active game socket sync from 2000ms down to 150ms polling intervals. Real game multiplayer and world server ports (e.g., MIR4 port 33000/33001) are routed virtually instantaneously on connection start.
+  - Automatic cleanup of stale or orphan gateway routes on application launch and shutdown, preventing routing conflicts from previous abnormal exits.
+  - Explicitly excluded the WireGuard VPS endpoint IP from tunnel routing to guarantee rock-solid connectivity.
+
 ## 0.6.1 — 2026-10-14
 
 - **VPN Failure Detection & Automatic Zero-Drop Failover Bypass**:
