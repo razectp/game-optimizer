@@ -383,22 +383,24 @@ impl GuiApp {
     fn import_conf_file(&mut self) {
         if let Some(file_path) = rfd::FileDialog::new()
             .add_filter("Configuração WireGuard (*.conf)", &["conf"])
-            .set_title("Selecione o arquivo .conf do WireGuard")
+            .set_title("Selecione o arquivo .conf do WireGuard para Importar / Reimportar")
             .pick_file()
         {
             match std::fs::read_to_string(&file_path) {
                 Ok(content) => match WireGuardConfig::parse_conf(&content) {
-                    Ok(parsed) => {
+                    Ok(mut parsed) => {
+                        parsed.enabled = true;
                         self.wireguard_cfg = parsed;
                         let file_name = file_path
                             .file_name()
                             .map(|s| s.to_string_lossy())
                             .unwrap_or_default();
-                        self.push_log(format!("Túnel importado com sucesso de {file_name}"));
+                        self.push_log(format!("Configuração WireGuard reimportada com sucesso de '{file_name}'."));
                         self.save_app_config();
+                        let _ = self.ui_tx.send(UiCmd::Scan);
                     }
                     Err(err) => {
-                        self.push_log(format!("Erro ao processar .conf: {err}"));
+                        self.push_log(format!("Erro ao processar arquivo .conf: {err}"));
                     }
                 },
                 Err(err) => {
@@ -406,6 +408,16 @@ impl GuiApp {
                 }
             }
         }
+    }
+
+    fn reload_config_from_profile(&mut self) {
+        let loaded = AppConfig::load_or_default(&self.config_path).unwrap_or_default();
+        self.app_config = loaded.clone();
+        self.wireguard_cfg = loaded.wireguard;
+        self.trim_game_memory = loaded.trim_game_memory;
+        self.push_log("Configurações recarregadas do perfil (%LOCALAPPDATA%\\GameOptimizer).");
+        let _ = self.ui_tx.send(UiCmd::UpdateConfig(Box::new(self.app_config.clone())));
+        let _ = self.ui_tx.send(UiCmd::Scan);
     }
 
     fn pick_game_exe(&mut self) {
@@ -692,10 +704,27 @@ impl GuiApp {
                     .stroke(Stroke::new(1.0, STROKE))
                     .corner_radius(8.0),
                 )
-                .on_hover_text("Clique para visualizar ou importar túnel WireGuard (.conf)")
+                .on_hover_text("Clique para abrir configurações e opções do túnel WireGuard")
                 .clicked()
             {
                 self.show_tunnel_modal = true;
+            }
+
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("📥 Importar .conf")
+                            .color(Color32::from_rgb(28, 22, 12))
+                            .size(12.0)
+                            .strong(),
+                    )
+                    .fill(ACCENT)
+                    .corner_radius(8.0),
+                )
+                .on_hover_text("Importe ou reimporte diretamente um arquivo .conf do WireGuard")
+                .clicked()
+            {
+                self.import_conf_file();
             }
         });
     }
@@ -902,6 +931,45 @@ impl GuiApp {
                                     self.show_process_modal = true;
                                     self.process_tab = ProcessTab::RunningProcesses;
                                     self.refresh_running_processes();
+                                }
+
+                                ui.add_space(10.0);
+                                section_label(ui, "TÚNEL WIREGUARD (VPS)");
+
+                                if ui
+                                    .add_sized(
+                                        [ui.available_width(), 34.0],
+                                        egui::Button::new(
+                                            RichText::new("📥 Importar / Reimportar (.conf)")
+                                                .color(Color32::from_rgb(28, 22, 12))
+                                                .strong(),
+                                        )
+                                        .fill(ACCENT)
+                                        .corner_radius(7.0),
+                                    )
+                                    .on_hover_text("Selecione um arquivo .conf do WireGuard para importar ou reimportar suas credenciais imediatamente")
+                                    .clicked()
+                                {
+                                    self.import_conf_file();
+                                }
+
+                                ui.add_space(4.0);
+                                if ui
+                                    .add_sized(
+                                        [ui.available_width(), 30.0],
+                                        egui::Button::new(
+                                            RichText::new("🛡️ Configurações do Túnel")
+                                                .color(TEXT)
+                                                .strong(),
+                                        )
+                                        .fill(BG_ROW)
+                                        .stroke(Stroke::new(1.0, STROKE))
+                                        .corner_radius(7.0),
+                                    )
+                                    .on_hover_text("Abra a janela de opções do túnel WireGuard, ping da VPS e rotas ativas")
+                                    .clicked()
+                                {
+                                    self.show_tunnel_modal = true;
                                 }
 
                                 ui.add_space(10.0);
@@ -1153,14 +1221,14 @@ impl GuiApp {
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("📥 Importar Túnel (.conf)")
+                                RichText::new("📥 Importar / Reimportar (.conf)")
                                     .strong()
                                     .color(Color32::from_rgb(28, 22, 12)),
                             )
                             .fill(ACCENT)
                             .corner_radius(6.0),
                         )
-                        .on_hover_text("Importe diretamente um arquivo .conf do WireGuard gerado pelo seu servidor")
+                        .on_hover_text("Selecione um arquivo .conf do WireGuard para substituir as credenciais atuais")
                         .clicked()
                     {
                         self.import_conf_file();
@@ -1184,6 +1252,19 @@ impl GuiApp {
                         .clicked()
                     {
                         self.show_paste_conf = !self.show_paste_conf;
+                    }
+
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("🔄 Recarregar do Perfil").color(MUTED))
+                                .fill(BG_ROW)
+                                .stroke(Stroke::new(1.0, STROKE))
+                                .corner_radius(6.0),
+                        )
+                        .on_hover_text("Recarregar configurações salvas no perfil (%LOCALAPPDATA%\\GameOptimizer)")
+                        .clicked()
+                    {
+                        self.reload_config_from_profile();
                     }
                 });
 

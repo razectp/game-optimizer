@@ -16,9 +16,11 @@
   The optimizer automatically resolves parent process chains to detect the root game process
   and root PID (e.g. recognizing the root launcher and shipping binaries), allowing 1-click
   monitoring, memory trim, or protection.
-- **Direct WireGuard Tunnel Import (.conf) in GUI**: Users can import standard
-  WireGuard `.conf` configuration files directly via a native Windows file dialog or paste
-  the text into the UI, identical to the official WireGuard client.
+- **Direct WireGuard Tunnel Import & Re-import (.conf) Everywhere**: Users can import
+  or re-import standard WireGuard `.conf` configuration files directly via 1-click native Windows file
+  dialogs prominently placed in the top KPI bar, in the right sidebar ("TÚNEL WIREGUARD (VPS)"),
+  and inside the tunnel modal. Also supports pasting raw `.conf` text and a new "🔄 Recarregar do Perfil"
+  button to reload saved configurations from disk.
 - **Secure Per-User Profile Storage**: All user settings and imported WireGuard tunnels
   are persisted securely in `%LOCALAPPDATA%\GameOptimizer\config.toml`.
 - **Granular Memory Trim & Protection Controls**: Users can configure game-only trim,
