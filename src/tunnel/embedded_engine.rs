@@ -60,9 +60,12 @@ impl EmbeddedTunnelHandle {
         self.handshake_confirmed.load(Ordering::SeqCst)
     }
 
-    /// Whether the tunnel is currently receiving packets from the VPS peer.
+    /// Whether the tunnel is currently authenticated and connected with the WireGuard peer.
     pub fn is_connected(&self) -> bool {
         if !self.handshake_confirmed.load(Ordering::SeqCst) {
+            return false;
+        }
+        if self.stop_flag.load(Ordering::Relaxed) {
             return false;
         }
         let now = SystemTime::now()
@@ -71,16 +74,18 @@ impl EmbeddedTunnelHandle {
             .as_secs();
         let last = self.last_rx_secs.load(Ordering::SeqCst);
         if last == 0 {
-            return false;
+            return true;
         }
-        // If no packet received in the last 8 seconds, consider connection degraded
-        now.saturating_sub(last) <= 8
+        // WireGuard standard REKEY_ATTEMPT_TIME window (90s).
+        // WireGuard is silent when idle or when host drops ICMP.
+        // We only consider connection lost if no packet has arrived for over 90 seconds.
+        now.saturating_sub(last) <= 90
     }
 
     /// Whether the tunnel was recently initiated and is waiting for initial handshake.
     pub fn is_initial_connecting(&self) -> bool {
         !self.handshake_confirmed.load(Ordering::SeqCst)
-            && self.started_at.elapsed() < Duration::from_secs(4)
+            && self.started_at.elapsed() < Duration::from_secs(25)
     }
 
     /// Seconds since the last packet was received from the VPS peer.
@@ -204,11 +209,11 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
         .set_read_timeout(Some(Duration::from_millis(100)))
         .map_err(|e| format!("Falha ao configurar timeout do socket: {e}"))?;
 
-    // Create BoringTun Tunn instance with gaming-optimized keepalive (3s heartbeat)
+    // Use standard WireGuard NAT persistent keepalive (default: 25s)
     let keepalive_val = if config.keepalive == 0 {
-        3
+        25
     } else {
-        config.keepalive.clamp(2, 4)
+        config.keepalive
     };
     let tunn = Arc::new(std::sync::Mutex::new(Tunn::new(
         static_private,
@@ -355,7 +360,7 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
 
         threads.push(thread::spawn(move || {
             let mut out_buf = vec![0u8; 65535];
-            let mut last_handshake = Instant::now();
+            let mut last_handshake_retry = Instant::now();
 
             while !stop.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(250));
@@ -364,28 +369,39 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
                 };
+                // BoringTun manages WireGuard timers, keepalives, and standard rekeys internally
                 if let TunnResult::WriteToNetwork(packet) = t.update_timers(&mut out_buf) {
                     let _ = socket.send_to(packet, endpoint_addr);
                 }
 
-                // Check whether connection is currently active and receiving packets
-                let is_conn = {
+                // If initial handshake hasn't confirmed yet, retry initiation every 5 seconds
+                if !hs_confirmed.load(Ordering::SeqCst) {
+                    if last_handshake_retry.elapsed() >= Duration::from_secs(5) {
+                        if let TunnResult::WriteToNetwork(packet) =
+                            t.format_handshake_initiation(&mut out_buf, false)
+                        {
+                            let _ = socket.send_to(packet, endpoint_addr);
+                        }
+                        last_handshake_retry = Instant::now();
+                    }
+                } else {
+                    // Handshake confirmed: Only if total silence exceeds 60s, attempt a rekey initiation
                     let last = rx_secs.load(Ordering::SeqCst);
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    hs_confirmed.load(Ordering::SeqCst) && last > 0 && now.saturating_sub(last) <= 8
-                };
-
-                // If not connected or degraded, actively retry handshake initiation every 3s
-                if !is_conn && last_handshake.elapsed() > Duration::from_secs(3) {
-                    if let TunnResult::WriteToNetwork(packet) =
-                        t.format_handshake_initiation(&mut out_buf, false)
+                    if last > 0
+                        && now.saturating_sub(last) > 60
+                        && last_handshake_retry.elapsed() >= Duration::from_secs(15)
                     {
-                        let _ = socket.send_to(packet, endpoint_addr);
+                        if let TunnResult::WriteToNetwork(packet) =
+                            t.format_handshake_initiation(&mut out_buf, false)
+                        {
+                            let _ = socket.send_to(packet, endpoint_addr);
+                        }
+                        last_handshake_retry = Instant::now();
                     }
-                    last_handshake = Instant::now();
                 }
             }
         }));

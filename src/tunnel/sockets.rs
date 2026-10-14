@@ -45,8 +45,8 @@ struct MibUdpRowOwnerPid {
     owning_pid: u32,
 }
 
-/// Reset an active game TCP connection to trigger immediate client reconnection
-/// over the newly created tunnel route (ExitLag behavior).
+/// Reset an active game TCP connection.
+#[allow(dead_code)]
 pub fn reset_tcp_connection(pid: u32, remote_ip: Ipv4Addr) -> bool {
     let mut size: u32 = 0;
     let _ = unsafe {

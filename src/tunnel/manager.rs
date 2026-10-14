@@ -209,15 +209,10 @@ impl TunnelManager {
                 report.removed_routes.extend(removed);
                 report.fallback_bypassed = true;
 
-                // Reset established TCP connections so game clients reconnect immediately
-                // over the default physical gateway instead of hanging on dead tunnel sockets.
-                for (pid, conns) in &self.active_connections {
-                    for conn in conns {
-                        if conn.protocol == "TCP" {
-                            crate::tunnel::sockets::reset_tcp_connection(*pid, conn.remote_ip);
-                        }
-                    }
-                }
+                // NOTE: We deliberately do NOT reset TCP connections here.
+                // Purging host routes instantly allows subsequent game packets to flow directly
+                // through the physical default gateway. Resetting TCP connections forces games
+                // (like MIR4) to display "reconnect" errors and freeze.
             }
             self.active_connections.clear();
             self.status_text =

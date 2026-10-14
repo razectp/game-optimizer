@@ -8,6 +8,12 @@
   - Accelerated active game socket sync from 2000ms down to 150ms polling intervals. Real game multiplayer and world server ports (e.g., MIR4 port 33000/33001) are routed virtually instantaneously on connection start.
   - Automatic cleanup of stale or orphan gateway routes on application launch and shutdown, preventing routing conflicts from previous abnormal exits.
   - Explicitly excluded the WireGuard VPS endpoint IP from tunnel routing to guarantee rock-solid connectivity.
+- **Ping-Independent Connection Validation & Elimination of Reconnect Cycles**:
+  - Eliminated aggressive 8-second silence timeout that caused constant false-positive "connection failure" cycles on hosts that block ICMP ping or during quiet game periods.
+  - Standardized connection health to WireGuard's RFC-standard 90s `REKEY_ATTEMPT_TIME` window and expanded initial handshake window to 25s.
+  - Normalized NAT persistent keepalive to 25s without 2..4s over-clamping, eliminating handshake renegotiation loops.
+  - Completely eliminated `reset_tcp_connection` from fallback: routing tables are cleanly cleared without killing existing game TCP sockets.
+  - Reassured users in GUI ping diagnostics that ICMP drops by host firewalls are normal and WireGuard UDP operates completely independently.
 
 ## 0.6.1 — 2026-10-14
 

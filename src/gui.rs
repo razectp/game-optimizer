@@ -2152,8 +2152,9 @@ fn spawn_worker(
                             let _ = worker_tx.send(WorkerMsg::Log(format!("Ping VPS: {ms}ms.")));
                         }
                         Err(err) => {
-                            let _ =
-                                worker_tx.send(WorkerMsg::Log(format!("Falha no ping VPS: {err}")));
+                            let _ = worker_tx.send(WorkerMsg::Log(format!(
+                                "Aviso ping VPS: Sem resposta ICMP ({err}). Se o firewall da sua VPS bloquear ping, isso é normal — o túnel WireGuard UDP opera normalmente e não depende de ping."
+                            )));
                         }
                     }
                     let _ = worker_tx.send(WorkerMsg::Tunnel(tunnel_mgr.status()));
