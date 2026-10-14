@@ -23,7 +23,7 @@ pub fn render_report(report: &OptimizeReport) -> String {
     lines.push(format!("Games detected: {}", report.games.len()));
     if report.games.is_empty() {
         lines.push(String::from(
-            "  (none — start a game, or add its process name to games.toml)",
+            "  (none — start a game, or select its process in the optimizer)",
         ));
     } else {
         for game in &report.games {

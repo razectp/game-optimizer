@@ -21,9 +21,9 @@ use game_optimizer::win_window;
     version
 )]
 struct Cli {
-    /// Path to optional games.toml allowlist/settings.
-    #[arg(long, global = true, default_value = "games.toml")]
-    config: PathBuf,
+    /// Path to optional config allowlist/settings.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
 
     /// Force the graphical interface.
     #[arg(long)]
@@ -95,15 +95,24 @@ fn main() -> anyhow::Result<()> {
     attach_parent_console();
     let cli = Cli::parse();
 
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(AppConfig::user_config_path);
+
     if cli.setup || cli.gui || cli.command.is_none() {
         if !win_window::try_become_single_instance() {
             let _ = win_window::restore_main_window(false);
             return Ok(());
         }
-        return gui::run(cli.config).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
+        return gui::run(config_path).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
     }
 
-    let config = AppConfig::load_or_default(&cli.config)?;
+    let config = if let Some(path) = &cli.config {
+        AppConfig::load_or_default(path)?
+    } else {
+        AppConfig::load_or_default(&config_path)?
+    };
     let command = cli
         .command
         .expect("subcommand present when not launching GUI");
@@ -157,7 +166,7 @@ fn main() -> anyhow::Result<()> {
             if let Some(path) = &config.source_path {
                 println!("Loaded from: {}", path.display());
             } else {
-                println!("Using built-in defaults (no games.toml loaded).");
+                println!("Using built-in defaults (no external config file).");
             }
         }
         Commands::Autostart { on, off } => {

@@ -21,7 +21,7 @@ if (-not $ScriptDir) {
 $Root = Split-Path -Parent $ScriptDir
 if (-not $Root) { $Root = $ScriptDir }
 
-$Version = "0.6.0"
+$Version = "0.6.1"
 $ExeName = "game_optimizer.exe"
 $CargoToml = Join-Path $Root "Cargo.toml"
 if (-not (Test-Path -LiteralPath $CargoToml)) {
@@ -53,8 +53,6 @@ Copy-Item -LiteralPath $ReleaseExe -Destination (Join-Path $StageDir $ExeName) -
 $GamesToml = Join-Path $Root "games.toml"
 if (Test-Path -LiteralPath $GamesToml) {
     Copy-Item -LiteralPath $GamesToml -Destination (Join-Path $StageDir "games.toml") -Force
-} else {
-    Write-Host "Warning: games.toml not found at $GamesToml"
 }
 
 $UninstallSrc = Join-Path $ScriptDir "uninstall.ps1"

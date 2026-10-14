@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.1 — 2026-10-14
+
+- **Zero External Configuration Dependency**: Compiles and runs out of the box with safe
+  built-in defaults (`AppConfig::default()`). No external `games.toml` file is required on disk.
+- **Interactive Running Process Picker & Root Process Tree Detection**: Users can select
+  directly from active running processes in the GUI without navigating file explorer directories.
+  The optimizer automatically resolves parent process chains to detect the root game process
+  and root PID (e.g. recognizing the root launcher and shipping binaries), allowing 1-click
+  monitoring, memory trim, or protection.
+- **Direct WireGuard Tunnel Import (.conf) in GUI**: Users can import standard
+  WireGuard `.conf` configuration files directly via a native Windows file dialog or paste
+  the text into the UI, identical to the official WireGuard client.
+- **Secure Per-User Profile Storage**: All user settings and imported WireGuard tunnels
+  are persisted securely in `%LOCALAPPDATA%\GameOptimizer\config.toml`.
+- **Granular Memory Trim & Protection Controls**: Users can configure game-only trim,
+  background trim thresholds (in MB), custom reclaim process lists, and a protected "never trim"
+  whitelist (Discord, OBS, stream software, IDEs) directly in the user interface.
+
 ## 0.6.0 — 2026-10-14
 
 - **Autonomous Embedded WireGuard Engine**: Fully embedded userspace WireGuard

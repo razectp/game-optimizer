@@ -1,6 +1,6 @@
 [package]
 name = "game_optimizer"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Windows game performance optimizer with GUI, tray, and installer"
@@ -27,6 +27,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 sysinfo = "0.39.6"
 toml = "0.9.5"
 tray-icon = "0.25.0"
+rfd = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [

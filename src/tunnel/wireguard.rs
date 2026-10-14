@@ -173,6 +173,89 @@ impl WireGuardConfig {
         Ok(path)
     }
 
+    /// Parse a standard WireGuard `.conf` payload into `WireGuardConfig`.
+    pub fn parse_conf(content: &str) -> anyhow::Result<Self> {
+        let mut cfg = Self::default();
+        let mut section = "";
+
+        for raw_line in content.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+
+            if line.starts_with('[') && line.ends_with(']') {
+                let s = line[1..line.len() - 1].trim();
+                if s.eq_ignore_ascii_case("interface") {
+                    section = "interface";
+                } else if s.eq_ignore_ascii_case("peer") {
+                    section = "peer";
+                } else {
+                    section = "";
+                }
+                continue;
+            }
+
+            let Some((key, val)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim().to_ascii_lowercase();
+            let val = val.trim();
+
+            match section {
+                "interface" => match key.as_str() {
+                    "privatekey" => cfg.private_key = val.to_string(),
+                    "address" => {
+                        let first = val.split(',').next().unwrap_or(val).trim();
+                        let ip_str = first.split('/').next().unwrap_or(first).trim();
+                        if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                            cfg.tunnel_ip = ip.to_string();
+                            let octets = ip.octets();
+                            let gw = Ipv4Addr::new(octets[0], octets[1], octets[2], 1);
+                            cfg.tunnel_gateway = gw.to_string();
+                        }
+                    }
+                    "dns" => {
+                        let first_dns = val.split(',').next().unwrap_or(val).trim();
+                        if !first_dns.is_empty() {
+                            cfg.dns = Some(first_dns.to_string());
+                        }
+                    }
+                    "mtu" => {
+                        if let Ok(mtu) = val.parse::<u16>() {
+                            cfg.mtu = mtu;
+                        }
+                    }
+                    _ => {}
+                },
+                "peer" => match key.as_str() {
+                    "publickey" => cfg.peer_public_key = val.to_string(),
+                    "endpoint" => cfg.endpoint = val.to_string(),
+                    "persistentkeepalive" => {
+                        if let Ok(ka) = val.parse::<u16>() {
+                            cfg.keepalive = ka;
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+
+        if cfg.private_key.is_empty() {
+            anyhow::bail!("Arquivo .conf inválido: PrivateKey não encontrada na seção [Interface]");
+        }
+        if cfg.peer_public_key.is_empty() {
+            anyhow::bail!("Arquivo .conf inválido: PublicKey não encontrada na seção [Peer]");
+        }
+        if cfg.endpoint.is_empty() {
+            anyhow::bail!("Arquivo .conf inválido: Endpoint não encontrado na seção [Peer]");
+        }
+
+        cfg.enabled = true;
+        Ok(cfg)
+    }
+
     /// Measure ICMP round-trip time (ping) to the VPS endpoint or internal gateway in milliseconds.
     pub fn ping_vps(&self, timeout: Duration) -> Result<u32, String> {
         // First try the internal tunnel gateway (direct inside-tunnel ping)
@@ -283,5 +366,40 @@ mod tests {
         let mut cfg = WireGuardConfig::default();
         cfg.endpoint = "127.0.0.1:51820".into();
         assert_eq!(cfg.resolve_endpoint_ip(), Some(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn parse_valid_wireguard_conf() {
+        let conf_text = r#"
+            # Client configuration
+            [Interface]
+            PrivateKey = aGVsbG9fd2lyZWd1YXJkX3ByaXZhdGVfa2V5X2Jhc2U2NA==
+            Address = 10.8.0.5/24
+            DNS = 1.1.1.1, 8.8.8.8
+            MTU = 1380
+
+            [Peer]
+            PublicKey = c2VydmVyX3B1YmxpY19rZXlfYmFzZTY0X2Zvcl90ZXN0aW5n=
+            Endpoint = 203.0.113.50:51820
+            AllowedIPs = 0.0.0.0/0
+            PersistentKeepalive = 30
+        "#;
+
+        let cfg = WireGuardConfig::parse_conf(conf_text).expect("deve fazer o parse com sucesso");
+        assert!(cfg.enabled);
+        assert_eq!(cfg.private_key, "aGVsbG9fd2lyZWd1YXJkX3ByaXZhdGVfa2V5X2Jhc2U2NA==");
+        assert_eq!(cfg.peer_public_key, "c2VydmVyX3B1YmxpY19rZXlfYmFzZTY0X2Zvcl90ZXN0aW5n=");
+        assert_eq!(cfg.endpoint, "203.0.113.50:51820");
+        assert_eq!(cfg.tunnel_ip, "10.8.0.5");
+        assert_eq!(cfg.tunnel_gateway, "10.8.0.1");
+        assert_eq!(cfg.dns, Some("1.1.1.1".to_string()));
+        assert_eq!(cfg.mtu, 1380);
+        assert_eq!(cfg.keepalive, 30);
+    }
+
+    #[test]
+    fn parse_conf_missing_required_fields_fails() {
+        let invalid = "[Interface]\nAddress = 10.8.0.2\n";
+        assert!(WireGuardConfig::parse_conf(invalid).is_err());
     }
 }

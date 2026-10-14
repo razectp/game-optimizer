@@ -36,6 +36,121 @@ pub struct ProcessSnapshot {
     pub class: ProcessClass,
 }
 
+/// Detailed information for interactive process picking and root detection in GUI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningProcessInfo {
+    /// OS process identifier.
+    pub pid: u32,
+    /// Parent process identifier if available.
+    pub parent_pid: Option<u32>,
+    /// Root process PID in this application tree.
+    pub root_pid: u32,
+    /// Root process executable name (without `.exe`, normalized).
+    pub root_name: String,
+    /// Process display name as reported by the OS.
+    pub name: String,
+    /// Normalized process name used for matching.
+    pub normalized_name: String,
+    /// Working set memory in bytes.
+    pub memory_bytes: u64,
+    /// Full path to the executable if accessible.
+    pub exe_path: Option<String>,
+    /// Whether this process is recognized as a game in current config.
+    pub is_game: bool,
+}
+
+/// Enumerate all non-system running processes with root process tree detection.
+pub fn list_running_processes(config: &AppConfig) -> Vec<RunningProcessInfo> {
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    let self_pid = std::process::id();
+
+    let mut result = Vec::new();
+
+    for (pid, process) in system.processes() {
+        let pid_u32 = pid_as_u32(*pid);
+        if pid_u32 == 0 || pid_u32 == self_pid {
+            continue;
+        }
+
+        let name = process.name().to_string_lossy().into_owned();
+        let normalized = normalize_process_name(&name);
+
+        if is_protected_name(&normalized) {
+            continue;
+        }
+
+        let memory_bytes = process.memory();
+        let exe_path = process.exe().map(|p| p.to_string_lossy().into_owned());
+        let parent_pid = process.parent().map(pid_as_u32);
+
+        // Walk up parent tree to find root process
+        let mut root_pid = pid_u32;
+        let mut root_name = normalized.clone();
+        let mut curr_pid = *pid;
+
+        while let Some(parent_p) = system.process(curr_pid).and_then(|p| p.parent()) {
+            let parent_u32 = pid_as_u32(parent_p);
+            if parent_u32 == 0 || parent_u32 == pid_u32 {
+                break;
+            }
+            if let Some(parent_proc) = system.process(parent_p) {
+                let p_norm = normalize_process_name(&parent_proc.name().to_string_lossy());
+                if is_protected_name(&p_norm) || is_launcher_name(&p_norm) {
+                    root_pid = pid_as_u32(curr_pid);
+                    if let Some(cp) = system.process(curr_pid) {
+                        root_name = normalize_process_name(&cp.name().to_string_lossy());
+                    }
+                    break;
+                }
+                root_pid = parent_u32;
+                root_name = p_norm;
+                curr_pid = parent_p;
+            } else {
+                break;
+            }
+        }
+
+        let is_game = is_game(config, &normalized, exe_path.as_deref().map(Path::new))
+            || config.game_names.contains(&root_name);
+
+        result.push(RunningProcessInfo {
+            pid: pid_u32,
+            parent_pid,
+            root_pid,
+            root_name,
+            name,
+            normalized_name: normalized,
+            memory_bytes,
+            exe_path,
+            is_game,
+        });
+    }
+
+    result.sort_by_key(|p| std::cmp::Reverse(p.memory_bytes));
+    result
+}
+
+/// Known game launcher process names (without `.exe`).
+pub fn is_launcher_name(name: &str) -> bool {
+    matches!(
+        name,
+        "steam"
+            | "steamwebhelper"
+            | "steamservice"
+            | "epicgameslauncher"
+            | "epicwebhelper"
+            | "galaxyclient"
+            | "origin"
+            | "eadesktop"
+            | "riotclientservices"
+            | "wemade"
+            | "wemadeclient"
+            | "battlenet"
+            | "upc"
+    )
+}
+
 /// Collect and classify all processes using `config`.
 pub fn snapshot_processes(config: &AppConfig) -> Vec<ProcessSnapshot> {
     let mut system = System::new();

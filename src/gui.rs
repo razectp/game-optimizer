@@ -18,6 +18,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::autostart;
 use crate::config::AppConfig;
+use crate::detect::RunningProcessInfo;
 use crate::optimize::{optimize_system, OptimizeReport, OptimizeRequest};
 use crate::report::format_mib;
 use crate::tunnel::{TunnelStatus, WireGuardConfig};
@@ -43,12 +44,19 @@ enum WorkerMsg {
     Tunnel(TunnelStatus),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessTab {
+    RunningProcesses,
+    Games,
+    MemoryTrim,
+}
+
 enum UiCmd {
     Optimize { trim_game: bool },
     Scan,
     StartWatch { interval: u64, trim_game: bool },
     StopWatch,
-    UpdateWireGuard(WireGuardConfig),
+    UpdateConfig(Box<AppConfig>),
     TestVpsPing,
 }
 
@@ -202,7 +210,9 @@ fn paint_bg(ui: &egui::Ui) {
 }
 
 struct GuiApp {
+    #[allow(dead_code)]
     config_path: PathBuf,
+    app_config: AppConfig,
     report: Option<OptimizeReport>,
     logs: Vec<String>,
     watching: bool,
@@ -213,6 +223,15 @@ struct GuiApp {
     wireguard_cfg: WireGuardConfig,
     tunnel_status: Option<TunnelStatus>,
     show_tunnel_modal: bool,
+    show_process_modal: bool,
+    process_tab: ProcessTab,
+    running_processes: Vec<RunningProcessInfo>,
+    process_search_filter: String,
+    new_game_input: String,
+    new_reclaim_input: String,
+    new_never_trim_input: String,
+    show_paste_conf: bool,
+    paste_conf_text: String,
     /// Must stay owned so the tray icon is not destroyed.
     #[allow(dead_code)]
     tray: Option<TrayIcon>,
@@ -237,7 +256,8 @@ impl GuiApp {
             autostart::ensure_default_enabled().unwrap_or_else(|_| autostart::is_enabled());
 
         let initial_cfg = AppConfig::load_or_default(&config_path).unwrap_or_default();
-        let wireguard_cfg = initial_cfg.wireguard;
+        let wireguard_cfg = initial_cfg.wireguard.clone();
+        let trim_game_memory = initial_cfg.trim_game_memory;
 
         let menu = Menu::new();
         let tray_show = MenuItem::new("Abrir Game Optimizer", true, None);
@@ -269,18 +289,28 @@ impl GuiApp {
             ctx,
         );
 
-        let app = Self {
+        let mut app = Self {
             config_path,
+            app_config: initial_cfg,
             report: None,
             logs: vec!["Pronto. O X ou botão Bandeja minimizam para a bandeja.".into()],
             watching: false,
             watch_interval: 45,
-            trim_game_memory: false,
+            trim_game_memory,
             autostart,
             start_minimized_hint: false,
             wireguard_cfg,
             tunnel_status: None,
             show_tunnel_modal: false,
+            show_process_modal: false,
+            process_tab: ProcessTab::RunningProcesses,
+            running_processes: Vec::new(),
+            process_search_filter: String::new(),
+            new_game_input: String::new(),
+            new_reclaim_input: String::new(),
+            new_never_trim_input: String::new(),
+            show_paste_conf: false,
+            paste_conf_text: String::new(),
             tray,
             tray_show,
             tray_optimize,
@@ -291,8 +321,108 @@ impl GuiApp {
             watch_flag,
             started: Instant::now(),
         };
+        app.refresh_running_processes();
         let _ = app.ui_tx.send(UiCmd::Scan);
         app
+    }
+
+    fn refresh_running_processes(&mut self) {
+        self.running_processes = crate::detect::list_running_processes(&self.app_config);
+    }
+
+    fn add_process_as_game(&mut self, proc: &RunningProcessInfo) {
+        let mut added = false;
+        if self.app_config.add_game_name(&proc.normalized_name) {
+            added = true;
+        }
+        if proc.root_name != proc.normalized_name && self.app_config.add_game_name(&proc.root_name) {
+            added = true;
+        }
+        if added {
+            if proc.root_name != proc.normalized_name {
+                self.push_log(format!(
+                    "Jogo adicionado: {} (Processo raiz detectado: {}, PID: {})",
+                    proc.name, proc.root_name, proc.root_pid
+                ));
+            } else {
+                self.push_log(format!("Jogo adicionado: {} (PID: {})", proc.name, proc.pid));
+            }
+            self.save_app_config();
+            let _ = self.ui_tx.send(UiCmd::Scan);
+            self.refresh_running_processes();
+        }
+    }
+
+    fn remove_process_as_game(&mut self, proc: &RunningProcessInfo) {
+        let mut removed = false;
+        if self.app_config.remove_game_name(&proc.normalized_name) {
+            removed = true;
+        }
+        if proc.root_name != proc.normalized_name && self.app_config.remove_game_name(&proc.root_name) {
+            removed = true;
+        }
+        if removed {
+            self.push_log(format!("Jogo removido do monitoramento: {}", proc.name));
+            self.save_app_config();
+            let _ = self.ui_tx.send(UiCmd::Scan);
+            self.refresh_running_processes();
+        }
+    }
+
+    fn save_app_config(&mut self) {
+        self.app_config.wireguard = self.wireguard_cfg.clone();
+        self.app_config.trim_game_memory = self.trim_game_memory;
+        if let Err(err) = self.app_config.save_to_user_dir() {
+            self.push_log(format!("Erro ao salvar configuração no perfil: {err}"));
+        } else {
+            self.push_log("Configuração salva no seu perfil (%LOCALAPPDATA%\\GameOptimizer).");
+        }
+        let _ = self.ui_tx.send(UiCmd::UpdateConfig(Box::new(self.app_config.clone())));
+    }
+
+    fn import_conf_file(&mut self) {
+        if let Some(file_path) = rfd::FileDialog::new()
+            .add_filter("Configuração WireGuard (*.conf)", &["conf"])
+            .set_title("Selecione o arquivo .conf do WireGuard")
+            .pick_file()
+        {
+            match std::fs::read_to_string(&file_path) {
+                Ok(content) => match WireGuardConfig::parse_conf(&content) {
+                    Ok(parsed) => {
+                        self.wireguard_cfg = parsed;
+                        let file_name = file_path
+                            .file_name()
+                            .map(|s| s.to_string_lossy())
+                            .unwrap_or_default();
+                        self.push_log(format!("Túnel importado com sucesso de {file_name}"));
+                        self.save_app_config();
+                    }
+                    Err(err) => {
+                        self.push_log(format!("Erro ao processar .conf: {err}"));
+                    }
+                },
+                Err(err) => {
+                    self.push_log(format!("Falha ao ler arquivo: {err}"));
+                }
+            }
+        }
+    }
+
+    fn pick_game_exe(&mut self) {
+        if let Some(exe_path) = rfd::FileDialog::new()
+            .add_filter("Executáveis (*.exe)", &["exe"])
+            .set_title("Selecione o executável do Jogo")
+            .pick_file()
+        {
+            if let Some(file_name) = exe_path.file_name() {
+                let name = file_name.to_string_lossy();
+                if self.app_config.add_game_name(&name) {
+                    self.push_log(format!("Jogo adicionado: {name}"));
+                    self.save_app_config();
+                    let _ = self.ui_tx.send(UiCmd::Scan);
+                }
+            }
+        }
     }
 
     fn push_log(&mut self, line: impl AsRef<str>) {
@@ -401,6 +531,9 @@ impl App for GuiApp {
         if self.show_tunnel_modal {
             self.draw_tunnel_modal(&ctx);
         }
+        if self.show_process_modal {
+            self.draw_process_modal(&ctx);
+        }
     }
 }
 
@@ -477,13 +610,51 @@ impl GuiApp {
         ui.add_space(10.0);
         // Metric KPI strip
         ui.horizontal(|ui| {
-            metric_pill(ui, "🎮 Jogos", &self.game_count().to_string(), ACCENT);
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(format!("🎮 Jogos: {}", self.game_count()))
+                            .color(ACCENT)
+                            .strong()
+                            .size(12.0),
+                    )
+                    .fill(BG_RAISED)
+                    .stroke(Stroke::new(1.0, STROKE))
+                    .corner_radius(8.0),
+                )
+                .on_hover_text("Clique para gerenciar jogos monitorados")
+                .clicked()
+            {
+                self.process_tab = ProcessTab::Games;
+                self.show_process_modal = true;
+            }
+
             let (trim_label, trim_color) = if self.trim_game_memory {
                 ("Ativo (Jogos)", OK)
+            } else if self.app_config.trim_non_game_memory {
+                ("Ativo (Segundo Plano)", OK)
             } else {
                 ("Desativado", MUTED)
             };
-            metric_pill(ui, "🧹 Trim no Jogo", trim_label, trim_color);
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(format!("🧹 Trim: {trim_label}"))
+                            .color(trim_color)
+                            .strong()
+                            .size(12.0),
+                    )
+                    .fill(BG_RAISED)
+                    .stroke(Stroke::new(1.0, STROKE))
+                    .corner_radius(8.0),
+                )
+                .on_hover_text("Clique para gerenciar regras de trim de memória")
+                .clicked()
+            {
+                self.process_tab = ProcessTab::MemoryTrim;
+                self.show_process_modal = true;
+            }
+
             metric_pill(
                 ui,
                 "⏱️ Intervalo",
@@ -512,7 +683,7 @@ impl GuiApp {
                     .stroke(Stroke::new(1.0, STROKE))
                     .corner_radius(8.0),
                 )
-                .on_hover_text("Clique para visualizar detalhes do túnel WireGuard VPS")
+                .on_hover_text("Clique para visualizar ou importar túnel WireGuard (.conf)")
                 .clicked()
             {
                 self.show_tunnel_modal = true;
@@ -704,13 +875,33 @@ impl GuiApp {
                                         .clamping(egui::SliderClamping::Always),
                                 );
 
+                                ui.add_space(6.0);
+                                if ui
+                                    .add_sized(
+                                        [ui.available_width(), 34.0],
+                                        egui::Button::new(
+                                            RichText::new("⚙️ Gerenciar Jogos & Processos")
+                                                .color(TEXT)
+                                                .strong(),
+                                        )
+                                        .fill(BG_ROW)
+                                        .stroke(Stroke::new(1.0, STROKE))
+                                        .corner_radius(7.0),
+                                    )
+                                    .clicked()
+                                {
+                                    self.show_process_modal = true;
+                                    self.process_tab = ProcessTab::RunningProcesses;
+                                    self.refresh_running_processes();
+                                }
+
                                 ui.add_space(10.0);
                                 ui.separator();
                                 ui.add_space(6.0);
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("📄 Config:").color(MUTED).size(11.0));
+                                    ui.label(RichText::new("📁 Perfil:").color(MUTED).size(11.0));
                                     ui.label(
-                                        RichText::new(self.config_path.display().to_string())
+                                        RichText::new("%LOCALAPPDATA%\\GameOptimizer")
                                             .color(ACCENT)
                                             .size(11.0)
                                             .monospace(),
@@ -722,15 +913,18 @@ impl GuiApp {
         });
     }
 
-    fn draw_games(&self, ui: &mut egui::Ui) {
-        let Some(report) = &self.report else {
-            ui.label(RichText::new("Carregando processos…").color(MUTED));
-            return;
+    fn draw_games(&mut self, ui: &mut egui::Ui) {
+        let games = match &self.report {
+            Some(report) => report.games.clone(),
+            None => {
+                ui.label(RichText::new("Carregando processos…").color(MUTED));
+                return;
+            }
         };
 
-        if report.games.is_empty() {
+        if games.is_empty() {
             ui.vertical_centered(|ui| {
-                ui.add_space(12.0);
+                ui.add_space(8.0);
                 ui.label(RichText::new("🎮").size(24.0));
                 ui.add_space(4.0);
                 ui.label(
@@ -740,14 +934,49 @@ impl GuiApp {
                         .size(13.0),
                 );
                 ui.label(
-                    RichText::new("Inicie seu jogo normalmente. O túnel VPS e a priorização serão ativados sozinhos.")
+                    RichText::new("Inicie seu jogo ou escolha diretamente dos processos abertos.")
                         .color(MUTED)
                         .size(12.0),
                 );
-                ui.add_space(12.0);
+                ui.add_space(8.0);
+                if ui
+                    .add_sized(
+                        [240.0, 32.0],
+                        egui::Button::new(
+                            RichText::new("🎯 Escolher dos Processos em Execução")
+                                .strong()
+                                .color(Color32::from_rgb(28, 22, 12)),
+                        )
+                        .fill(ACCENT)
+                        .corner_radius(6.0),
+                    )
+                    .on_hover_text("Escolha diretamente da lista de processos abertos sem navegar pastas")
+                    .clicked()
+                {
+                    self.show_process_modal = true;
+                    self.process_tab = ProcessTab::RunningProcesses;
+                    self.refresh_running_processes();
+                }
+                ui.add_space(8.0);
             });
         } else {
-            for game in &report.games {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("JOGOS ATIVOS").color(MUTED).size(11.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button(RichText::new("➕ Adicionar outro processo").color(TEXT).size(11.0))
+                        .on_hover_text("Escolha outro processo aberto para monitorar")
+                        .clicked()
+                    {
+                        self.show_process_modal = true;
+                        self.process_tab = ProcessTab::RunningProcesses;
+                        self.refresh_running_processes();
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
+            for game in &games {
                 egui::Frame::new()
                     .fill(BG_ROW)
                     .stroke(Stroke::new(1.0, STROKE))
@@ -818,7 +1047,7 @@ impl GuiApp {
         let mut open = self.show_tunnel_modal;
         egui::Window::new("🛡️ Configuração do Túnel WireGuard (VPS)")
             .open(&mut open)
-            .default_width(540.0)
+            .default_width(560.0)
             .resizable(false)
             .show(ctx, |ui| {
                 ui.label(
@@ -847,6 +1076,90 @@ impl GuiApp {
                         }
                     }
                 });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("📥 Importar Túnel (.conf)")
+                                    .strong()
+                                    .color(Color32::from_rgb(28, 22, 12)),
+                            )
+                            .fill(ACCENT)
+                            .corner_radius(6.0),
+                        )
+                        .on_hover_text("Importe diretamente um arquivo .conf do WireGuard gerado pelo seu servidor")
+                        .clicked()
+                    {
+                        self.import_conf_file();
+                    }
+
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(if self.show_paste_conf {
+                                    "✖ Fechar Editor"
+                                } else {
+                                    "📋 Colar Configuração (.conf)"
+                                })
+                                .color(TEXT),
+                            )
+                            .fill(BG_ROW)
+                            .stroke(Stroke::new(1.0, STROKE))
+                            .corner_radius(6.0),
+                        )
+                        .on_hover_text("Abra um campo para colar o texto do arquivo .conf")
+                        .clicked()
+                    {
+                        self.show_paste_conf = !self.show_paste_conf;
+                    }
+                });
+
+                if self.show_paste_conf {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Cole o conteúdo do seu arquivo WireGuard .conf abaixo:")
+                            .color(MUTED)
+                            .size(11.0),
+                    );
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.paste_conf_text)
+                            .hint_text("[Interface]\nPrivateKey = ...\nAddress = 10.8.0.2/24\n\n[Peer]\nPublicKey = ...\nEndpoint = 198.51.100.1:51820")
+                            .desired_rows(6)
+                            .desired_width(ui.available_width()),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Aplicar Texto Colado")
+                                        .strong()
+                                        .color(Color32::from_rgb(28, 22, 12)),
+                                )
+                                .fill(OK)
+                                .corner_radius(6.0),
+                            )
+                            .clicked()
+                        {
+                            match WireGuardConfig::parse_conf(&self.paste_conf_text) {
+                                Ok(parsed) => {
+                                    self.wireguard_cfg = parsed;
+                                    self.push_log("Configuração WireGuard colada e aplicada com sucesso.");
+                                    self.save_app_config();
+                                    self.show_paste_conf = false;
+                                    self.paste_conf_text.clear();
+                                }
+                                Err(err) => {
+                                    self.push_log(format!("Erro no formato colado: {err}"));
+                                }
+                            }
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            self.show_paste_conf = false;
+                        }
+                    });
+                }
 
                 ui.add_space(8.0);
                 egui::Grid::new("wg_grid")
@@ -929,7 +1242,7 @@ impl GuiApp {
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("💾 Salvar em games.toml")
+                                RichText::new("💾 Salvar no Perfil (%LOCALAPPDATA%)")
                                     .strong()
                                     .color(Color32::from_rgb(28, 22, 12)),
                             )
@@ -938,8 +1251,7 @@ impl GuiApp {
                         )
                         .clicked()
                     {
-                        let _ = self.ui_tx.send(UiCmd::UpdateWireGuard(self.wireguard_cfg.clone()));
-                        self.push_log("Configurações do WireGuard enviadas.");
+                        self.save_app_config();
                     }
                 });
 
@@ -981,6 +1293,538 @@ impl GuiApp {
                 });
             });
         self.show_tunnel_modal = open;
+    }
+
+    fn draw_process_modal(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_process_modal;
+        egui::Window::new("⚙️ Gerenciador de Processos, Jogos & Trim")
+            .open(&mut open)
+            .default_width(700.0)
+            .default_height(500.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(
+                            self.process_tab == ProcessTab::RunningProcesses,
+                            RichText::new("📋 Processos em Execução").strong(),
+                        )
+                        .clicked()
+                    {
+                        self.process_tab = ProcessTab::RunningProcesses;
+                        self.refresh_running_processes();
+                    }
+                    if ui
+                        .selectable_label(
+                            self.process_tab == ProcessTab::Games,
+                            RichText::new("🎮 Jogos Cadastrados").strong(),
+                        )
+                        .clicked()
+                    {
+                        self.process_tab = ProcessTab::Games;
+                    }
+                    if ui
+                        .selectable_label(
+                            self.process_tab == ProcessTab::MemoryTrim,
+                            RichText::new("🧹 Memória & Regras de Trim").strong(),
+                        )
+                        .clicked()
+                    {
+                        self.process_tab = ProcessTab::MemoryTrim;
+                    }
+                });
+                ui.separator();
+                ui.add_space(6.0);
+
+                match self.process_tab {
+                    ProcessTab::RunningProcesses => {
+                        ui.label(
+                            RichText::new(
+                                "Escolha diretamente qualquer processo aberto no seu PC.\n\
+                                O Game Optimizer detecta automaticamente o processo e o PID raiz para priorização, memória e tunelamento WireGuard.",
+                            )
+                            .color(MUTED)
+                            .size(12.0),
+                        );
+                        ui.add_space(8.0);
+
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.process_search_filter)
+                                    .hint_text("🔍 Filtrar por nome ou PID...")
+                                    .desired_width(260.0),
+                            );
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("🔄 Atualizar Lista").color(TEXT))
+                                        .fill(BG_ROW)
+                                        .corner_radius(6.0),
+                                )
+                                .on_hover_text("Atualiza a lista de processos ativos")
+                                .clicked()
+                            {
+                                self.refresh_running_processes();
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(format!("{} processos ativos", self.running_processes.len()))
+                                        .color(MUTED)
+                                        .size(11.0),
+                                );
+                            });
+                        });
+
+                        ui.add_space(6.0);
+
+                        let filter = self.process_search_filter.trim().to_lowercase();
+                        let filtered_procs: Vec<RunningProcessInfo> = self
+                            .running_processes
+                            .iter()
+                            .filter(|p| {
+                                if filter.is_empty() {
+                                    true
+                                } else {
+                                    p.normalized_name.contains(&filter)
+                                        || p.name.to_lowercase().contains(&filter)
+                                        || p.root_name.contains(&filter)
+                                        || p.pid.to_string().contains(&filter)
+                                        || p.root_pid.to_string().contains(&filter)
+                                }
+                            })
+                            .cloned()
+                            .collect();
+
+                        if filtered_procs.is_empty() {
+                            ui.add_space(30.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(RichText::new("Nenhum processo encontrado com este filtro.").color(MUTED));
+                            });
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .max_height(340.0)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    for proc in &filtered_procs {
+                                        egui::Frame::new()
+                                            .fill(BG_ROW)
+                                            .stroke(Stroke::new(1.0, STROKE))
+                                            .corner_radius(6.0)
+                                            .inner_margin(egui::Margin::symmetric(10, 8))
+                                            .show(ui, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    let icon = if proc.is_game { "🎮" } else { "⚙️" };
+                                                    ui.label(RichText::new(icon).size(16.0));
+
+                                                    ui.vertical(|ui| {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(
+                                                                RichText::new(&proc.name)
+                                                                    .color(TEXT)
+                                                                    .strong()
+                                                                    .size(13.0),
+                                                            );
+                                                            ui.label(
+                                                                RichText::new(format!("PID {}", proc.pid))
+                                                                    .color(MUTED)
+                                                                    .size(11.0)
+                                                                    .monospace(),
+                                                            );
+                                                        });
+
+                                                        if proc.root_pid != proc.pid || proc.root_name != proc.normalized_name {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label(
+                                                                    RichText::new(format!(
+                                                                        "↳ Raiz detectada: {}.exe (PID {})",
+                                                                        proc.root_name, proc.root_pid
+                                                                    ))
+                                                                    .color(ACCENT)
+                                                                    .size(11.0),
+                                                                );
+                                                            });
+                                                        }
+                                                    });
+
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        ui.label(
+                                                            RichText::new(format_mib(proc.memory_bytes))
+                                                                .color(ACCENT)
+                                                                .strong()
+                                                                .size(12.0),
+                                                        );
+
+                                                        ui.add_space(8.0);
+
+                                                        // Game monitoring button/badge
+                                                        if proc.is_game {
+                                                            egui::Frame::new()
+                                                                .fill(Color32::from_rgba_unmultiplied(34, 197, 94, 25))
+                                                                .corner_radius(4.0)
+                                                                .inner_margin(egui::Margin::symmetric(6, 3))
+                                                                .show(ui, |ui| {
+                                                                    ui.label(RichText::new("🎮 Jogo").color(OK).size(11.0).strong());
+                                                                });
+
+                                                            if ui.small_button("❌").on_hover_text("Remover jogo do monitoramento").clicked() {
+                                                                self.remove_process_as_game(proc);
+                                                            }
+                                                        } else if ui
+                                                            .add(
+                                                                egui::Button::new(
+                                                                    RichText::new("🎮 Monitorar Jogo")
+                                                                        .color(Color32::from_rgb(28, 22, 12))
+                                                                        .strong()
+                                                                        .size(11.0),
+                                                                )
+                                                                .fill(ACCENT)
+                                                                .corner_radius(4.0),
+                                                            )
+                                                            .on_hover_text("Detecta o processo e sua raiz (prioridade alta, WireGuard, P-cores)")
+                                                            .clicked()
+                                                        {
+                                                            self.add_process_as_game(proc);
+                                                        }
+
+                                                        // Trim button
+                                                        let is_reclaim = self.app_config.reclaim_names.contains(&proc.normalized_name);
+                                                        if is_reclaim {
+                                                            if ui
+                                                                .small_button(RichText::new("🧹 Trim ✓").color(OK).size(11.0))
+                                                                .on_hover_text("Clique para remover do Trim")
+                                                                .clicked()
+                                                            {
+                                                                self.app_config.remove_reclaim_name(&proc.normalized_name);
+                                                                self.save_app_config();
+                                                                self.refresh_running_processes();
+                                                            }
+                                                        } else if !proc.is_game
+                                                            && ui
+                                                                .small_button(RichText::new("🧹 Trim").color(MUTED).size(11.0))
+                                                                .on_hover_text("Adicionar ao trim de memória de segundo plano")
+                                                                .clicked()
+                                                        {
+                                                            self.app_config.add_reclaim_name(&proc.normalized_name);
+                                                            self.save_app_config();
+                                                            self.refresh_running_processes();
+                                                        }
+
+                                                        // Protect button
+                                                        let is_protected = self.app_config.never_trim_names.contains(&proc.normalized_name);
+                                                        if is_protected {
+                                                            if ui
+                                                                .small_button(RichText::new("🛡️ Protegido ✓").color(OK).size(11.0))
+                                                                .on_hover_text("Clique para desproteger")
+                                                                .clicked()
+                                                            {
+                                                                self.app_config.remove_never_trim_name(&proc.normalized_name);
+                                                                self.save_app_config();
+                                                                self.refresh_running_processes();
+                                                            }
+                                                        } else if !proc.is_game
+                                                            && ui
+                                                                .small_button(RichText::new("🛡️ Proteger").color(MUTED).size(11.0))
+                                                                .on_hover_text("Proteger este processo contra trim")
+                                                                .clicked()
+                                                        {
+                                                            self.app_config.add_never_trim_name(&proc.normalized_name);
+                                                            self.save_app_config();
+                                                            self.refresh_running_processes();
+                                                        }
+                                                    });
+                                                });
+                                            });
+                                        ui.add_space(4.0);
+                                    }
+                                });
+                        }
+                    }
+
+                    ProcessTab::Games => {
+                        ui.label(
+                            RichText::new(
+                                "Processos identificados como jogos recebem prioridade alta, P-Cores exclusivos e tunelamento WireGuard automático.",
+                            )
+                            .color(MUTED)
+                            .size(12.0),
+                        );
+                        ui.add_space(8.0);
+
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("📋 Escolher dos Processos em Execução")
+                                            .strong()
+                                            .color(Color32::from_rgb(28, 22, 12)),
+                                    )
+                                    .fill(ACCENT)
+                                    .corner_radius(6.0),
+                                )
+                                .on_hover_text("Escolha diretamente da lista de processos abertos no sistema")
+                                .clicked()
+                            {
+                                self.process_tab = ProcessTab::RunningProcesses;
+                                self.refresh_running_processes();
+                            }
+
+                            ui.add_space(4.0);
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("📁 Procurar .exe")
+                                            .strong()
+                                            .color(TEXT),
+                                    )
+                                    .fill(BG_ROW)
+                                    .corner_radius(6.0),
+                                )
+                                .on_hover_text("Abra o Explorer para selecionar o executável (.exe) do jogo instalado")
+                                .clicked()
+                            {
+                                self.pick_game_exe();
+                            }
+
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("ou").color(MUTED).size(12.0));
+                            ui.add_space(4.0);
+
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.new_game_input)
+                                    .hint_text("Nome (ex: mir4)")
+                                    .desired_width(140.0),
+                            );
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("➕ Adicionar").color(TEXT))
+                                        .fill(BG_ROW)
+                                        .corner_radius(6.0),
+                                )
+                                .clicked()
+                            {
+                                let name = self.new_game_input.trim().to_string();
+                                if !name.is_empty() && self.app_config.add_game_name(&name) {
+                                    self.push_log(format!("Jogo adicionado: {name}"));
+                                    self.save_app_config();
+                                    self.new_game_input.clear();
+                                    let _ = self.ui_tx.send(UiCmd::Scan);
+                                }
+                            }
+                        });
+
+                        ui.add_space(10.0);
+                        section_label(ui, "JOGOS PERSONALIZADOS DO USUÁRIO");
+
+                        let custom_games = self.app_config.user_custom_games();
+                        if custom_games.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "Nenhum jogo personalizado cadastrado ainda. Use a aba 'Processos em Execução' acima para selecionar jogos abertos.",
+                                )
+                                .color(MUTED)
+                                .size(11.0),
+                            );
+                        } else {
+                            egui::ScrollArea::vertical().max_height(130.0).show(ui, |ui| {
+                                for game in &custom_games {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("🎮").size(14.0));
+                                        ui.label(
+                                            RichText::new(format!("{game}.exe"))
+                                                .color(TEXT)
+                                                .strong()
+                                                .monospace(),
+                                        );
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new("❌").color(WARN).size(11.0),
+                                                )
+                                                .fill(BG_ROW)
+                                                .corner_radius(4.0),
+                                            )
+                                            .on_hover_text("Remover jogo da lista")
+                                            .clicked()
+                                        {
+                                            self.app_config.remove_game_name(game);
+                                            self.push_log(format!("Jogo removido: {game}"));
+                                            self.save_app_config();
+                                            let _ = self.ui_tx.send(UiCmd::Scan);
+                                        }
+                                    });
+                                }
+                            });
+                        }
+
+                        ui.add_space(10.0);
+                        ui.collapsing("ℹ️ Lista de Jogos Nativos Pré-configurados", |ui| {
+                            ui.label(
+                                RichText::new(
+                                    "O Game Optimizer reconhece nativamente os executáveis abaixo sem precisar cadastrá-los:",
+                                )
+                                .color(MUTED)
+                                .size(11.0),
+                            );
+                            ui.add_space(4.0);
+                            egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    for name in crate::config::GameCatalog::builtin_names() {
+                                        ui.label(
+                                            RichText::new(format!("{name}.exe"))
+                                                .color(MUTED)
+                                                .size(11.0)
+                                                .monospace(),
+                                        );
+                                    }
+                                });
+                            });
+                        });
+                    }
+
+                    ProcessTab::MemoryTrim => {
+                        ui.label(
+                            RichText::new(
+                                "Configure as regras de otimização de memória RAM para jogos e aplicativos em segundo plano.",
+                            )
+                            .color(MUTED)
+                            .size(12.0),
+                        );
+                        ui.add_space(8.0);
+
+                        let mut changed = false;
+                        if ui
+                            .checkbox(
+                                &mut self.trim_game_memory,
+                                RichText::new("Trim de memória nos Jogos (libera páginas frias do próprio jogo)")
+                                    .color(TEXT)
+                                    .size(12.0),
+                            )
+                            .changed()
+                        {
+                            self.app_config.trim_game_memory = self.trim_game_memory;
+                            changed = true;
+                        }
+
+                        if ui
+                            .checkbox(
+                                &mut self.app_config.trim_non_game_memory,
+                                RichText::new("Trim de memória em Apps de Segundo Plano (Browsers e apps pesados)")
+                                    .color(TEXT)
+                                    .size(12.0),
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let mut mb = (self.app_config.memory_trim_threshold_bytes / (1024 * 1024)) as u32;
+                            ui.label(RichText::new("Consumo mínimo para liberar:").color(MUTED).size(12.0));
+                            if ui.add(egui::Slider::new(&mut mb, 100..=1024).suffix(" MB")).changed() {
+                                self.app_config.memory_trim_threshold_bytes = (mb as u64) * 1024 * 1024;
+                                changed = true;
+                            }
+                        });
+
+                        if changed {
+                            self.save_app_config();
+                        }
+
+                        ui.add_space(10.0);
+                        section_label(ui, "APLICATIVOS ALVO DE TRIM (SEGUNDO PLANO)");
+                        ui.label(
+                            RichText::new("Apenas estes programas terão memória liberada quando o trim de 2º plano estiver ativo:")
+                                .color(MUTED)
+                                .size(11.0),
+                        );
+
+                        let reclaim_list: Vec<String> =
+                            self.app_config.reclaim_names.iter().cloned().collect();
+                        ui.horizontal_wrapped(|ui| {
+                            for app in &reclaim_list {
+                                egui::Frame::new()
+                                    .fill(BG_ROW)
+                                    .corner_radius(6.0)
+                                    .inner_margin(egui::Margin::symmetric(6, 3))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(app).color(TEXT).size(11.0));
+                                            if ui.small_button("❌").clicked() {
+                                                self.app_config.remove_reclaim_name(app);
+                                                self.save_app_config();
+                                            }
+                                        });
+                                    });
+                            }
+                        });
+
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.new_reclaim_input)
+                                    .hint_text("Nome do app (ex: opera)")
+                                    .desired_width(160.0),
+                            );
+                            if ui.button("➕ Adicionar para Trim").clicked() {
+                                let name = self.new_reclaim_input.trim().to_string();
+                                if !name.is_empty() {
+                                    self.app_config.add_reclaim_name(&name);
+                                    self.save_app_config();
+                                    self.new_reclaim_input.clear();
+                                }
+                            }
+                        });
+
+                        ui.add_space(12.0);
+                        section_label(ui, "LISTA DE PROTEÇÃO (NUNCA SOFREM TRIM)");
+                        ui.label(
+                            RichText::new("Estes processos NUNCA sofrerão esvaziamento de memória (Discord, OBS, gravadores, IDEs):")
+                                .color(MUTED)
+                                .size(11.0),
+                        );
+
+                        let never_trim_list: Vec<String> =
+                            self.app_config.never_trim_names.iter().cloned().collect();
+                        ui.horizontal_wrapped(|ui| {
+                            for app in &never_trim_list {
+                                egui::Frame::new()
+                                    .fill(BG_ROW)
+                                    .corner_radius(6.0)
+                                    .inner_margin(egui::Margin::symmetric(6, 3))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(app).color(OK).size(11.0));
+                                            if ui.small_button("❌").clicked() {
+                                                self.app_config.remove_never_trim_name(app);
+                                                self.save_app_config();
+                                            }
+                                        });
+                                    });
+                            }
+                        });
+
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.new_never_trim_input)
+                                    .hint_text("Nome protegido (ex: obs64)")
+                                    .desired_width(160.0),
+                            );
+                            if ui.button("➕ Proteger App").clicked() {
+                                let name = self.new_never_trim_input.trim().to_string();
+                                if !name.is_empty() {
+                                    self.app_config.add_never_trim_name(&name);
+                                    self.save_app_config();
+                                    self.new_never_trim_input.clear();
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+        self.show_process_modal = open;
     }
 }
 
@@ -1122,18 +1966,16 @@ fn spawn_worker(
                     let _ = worker_tx.send(WorkerMsg::Watching(false));
                     let _ = worker_tx.send(WorkerMsg::Log("Vigilância parada.".into()));
                 }
-                Ok(UiCmd::UpdateWireGuard(new_cfg)) => {
-                    let mut config = AppConfig::load_or_default(&config_path).unwrap_or_default();
-                    config.wireguard = new_cfg.clone();
-                    if let Err(err) = config.save_to_path(&config_path) {
+                Ok(UiCmd::UpdateConfig(new_cfg)) => {
+                    if let Err(err) = new_cfg.save_to_user_dir() {
                         let _ = worker_tx
-                            .send(WorkerMsg::Log(format!("Erro ao salvar games.toml: {err}")));
+                            .send(WorkerMsg::Log(format!("Erro ao salvar configuração: {err}")));
                     } else {
                         let _ = worker_tx.send(WorkerMsg::Log(
-                            "Configurações do WireGuard salvas em games.toml.".into(),
+                            "Configurações atualizadas no perfil (%LOCALAPPDATA%\\GameOptimizer).".into(),
                         ));
                     }
-                    tunnel_mgr.update_config(new_cfg);
+                    tunnel_mgr.update_config(new_cfg.wireguard.clone());
                     let _ = worker_tx.send(WorkerMsg::Tunnel(tunnel_mgr.status()));
                 }
                 Ok(UiCmd::TestVpsPing) => {

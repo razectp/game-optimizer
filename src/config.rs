@@ -66,8 +66,20 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Load `games.toml` if present; otherwise return defaults.
+    /// Return the standard path in user's profile `%LOCALAPPDATA%\GameOptimizer\config.toml`.
+    pub fn user_config_path() -> PathBuf {
+        crate::autostart::data_dir().join("config.toml")
+    }
+
+    /// Load configuration preferring `%LOCALAPPDATA%\GameOptimizer\config.toml`, then `games.toml`.
     pub fn load_or_default(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let user_path = Self::user_config_path();
+        if user_path.exists() {
+            let raw = fs::read_to_string(&user_path)?;
+            let file: ConfigFile = toml::from_str(&raw)?;
+            return Ok(Self::from_file(file, Some(user_path)));
+        }
+
         let path = path.as_ref();
         let local_sibling = path.with_file_name("games.local.toml");
         let target_path = if local_sibling.exists() {
@@ -103,9 +115,19 @@ impl AppConfig {
         Ok(Self::default())
     }
 
+    /// Save configuration directly to `%LOCALAPPDATA%\GameOptimizer\config.toml`.
+    pub fn save_to_user_dir(&self) -> anyhow::Result<PathBuf> {
+        let target = Self::user_config_path();
+        self.save_to_path(&target)?;
+        Ok(target)
+    }
+
     /// Save current configuration back to a TOML file.
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
         let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
         let file = ConfigFile {
             games: GamesSection {
                 names: self.game_names.iter().cloned().collect(),
@@ -129,6 +151,61 @@ impl AppConfig {
         let raw = toml::to_string_pretty(&file)?;
         fs::write(path, raw)?;
         Ok(())
+    }
+
+    /// Return user-added game names (excluding the builtin catalog).
+    pub fn user_custom_games(&self) -> Vec<String> {
+        let builtin = GameCatalog::builtin_names();
+        self.game_names
+            .iter()
+            .filter(|n| !builtin.contains(*n))
+            .cloned()
+            .collect()
+    }
+
+    /// Add a game process name (e.g. "Client-Win64-Shipping.exe" or "mir4").
+    pub fn add_game_name(&mut self, name: &str) -> bool {
+        let normalized = normalize_process_name(name);
+        if normalized.is_empty() {
+            return false;
+        }
+        self.game_names.insert(normalized)
+    }
+
+    /// Remove a game process name if present.
+    pub fn remove_game_name(&mut self, name: &str) -> bool {
+        let normalized = normalize_process_name(name);
+        self.game_names.remove(&normalized)
+    }
+
+    /// Add a process to the reclaim (memory trim allowed) list.
+    pub fn add_reclaim_name(&mut self, name: &str) -> bool {
+        let normalized = normalize_process_name(name);
+        if normalized.is_empty() {
+            return false;
+        }
+        self.reclaim_names.insert(normalized)
+    }
+
+    /// Remove a process from the reclaim list.
+    pub fn remove_reclaim_name(&mut self, name: &str) -> bool {
+        let normalized = normalize_process_name(name);
+        self.reclaim_names.remove(&normalized)
+    }
+
+    /// Add a process to the never-trim protection list.
+    pub fn add_never_trim_name(&mut self, name: &str) -> bool {
+        let normalized = normalize_process_name(name);
+        if normalized.is_empty() {
+            return false;
+        }
+        self.never_trim_names.insert(normalized)
+    }
+
+    /// Remove a process from the never-trim protection list.
+    pub fn remove_never_trim_name(&mut self, name: &str) -> bool {
+        let normalized = normalize_process_name(name);
+        self.never_trim_names.remove(&normalized)
     }
 
     fn from_file(file: ConfigFile, source_path: Option<PathBuf>) -> Self {
@@ -427,5 +504,34 @@ mod tests {
         let cfg = AppConfig::from_file(file, None);
         assert!(cfg.wireguard.enabled);
         assert_eq!(cfg.wireguard.endpoint, "1.2.3.4:51820");
+    }
+
+    #[test]
+    fn custom_game_and_trim_management() {
+        let mut cfg = AppConfig::default();
+        assert!(!cfg.user_custom_games().contains(&"mycustomgame".to_string()));
+
+        assert!(cfg.add_game_name("MyCustomGame.exe"));
+        assert!(cfg.user_custom_games().contains(&"mycustomgame".to_string()));
+        assert!(cfg.game_names.contains("mycustomgame"));
+
+        assert!(cfg.remove_game_name("MyCustomGame"));
+        assert!(!cfg.user_custom_games().contains(&"mycustomgame".to_string()));
+
+        cfg.add_reclaim_name("CustomBrowser.exe");
+        assert!(cfg.reclaim_names.contains("custombrowser"));
+        cfg.remove_reclaim_name("custombrowser");
+        assert!(!cfg.reclaim_names.contains("custombrowser"));
+
+        cfg.add_never_trim_name("CustomProtected.exe");
+        assert!(cfg.never_trim_names.contains("customprotected"));
+        cfg.remove_never_trim_name("customprotected");
+        assert!(!cfg.never_trim_names.contains("customprotected"));
+    }
+
+    #[test]
+    fn user_config_path_ends_with_config_toml() {
+        let path = AppConfig::user_config_path();
+        assert!(path.ends_with("config.toml"));
     }
 }

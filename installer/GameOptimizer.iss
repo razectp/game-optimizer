@@ -3,7 +3,7 @@
 ; Requires a release binary at ..\target\release\game_optimizer.exe
 
 #define AppName "Game Optimizer"
-#define AppVersion "0.6.0"
+#define AppVersion "0.6.1"
 #define AppPublisher "Game Optimizer"
 #define AppExeName "game_optimizer.exe"
 #define AppMutexName "GameOptimizer"
@@ -108,7 +108,6 @@ Name: "autostart"; Description: "{cm:StartWithWindows}"; GroupDescription: "{cm:
 
 [Files]
 Source: "..\target\release\game_optimizer.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\games.toml"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
 Source: "uninstall.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
