@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.0 — 2026-10-14
+
+- **Autonomous Embedded WireGuard Engine**: Fully embedded userspace WireGuard
+  powered by `boringtun` and `wintun.dll` (`GameOptimizerTun`). Operates
+  autonomously without requiring external WireGuard client installation, background
+  services, or any DLL injection.
+- **Isolated Per-PID Game Routing**: Dynamic socket inspection monitors active
+  connections of detected game PIDs (e.g. MIR4 / port 33000), dynamically injecting
+  host routing table entries (`/32`) directed to the WireGuard TUN adapter without
+  capturing other system traffic or interfering with external WireGuard instances.
+  Routes are automatically cleanly removed when games terminate.
+- **Embedded Default Configuration**: Direct WireGuard configuration pre-embedded
+  with UI modal to configure or test VPS ping latency.
+- **Pure GUI Subsystem**: Binary built with `windows_subsystem = "windows"` and
+  dynamic `AttachConsole` fallback to completely eliminate the background command
+  prompt console window while preserving CLI functionality when launched from a terminal.
+- **Strict Game-Only Memory Trim**: Memory trimming is focused exclusively on
+  detected games when enabled (`trim_game_memory`), with background application memory
+  trim disabled (`trim_non_game_memory = false`).
+- **Tray & Window Restoration Fixes**:
+  - Wired `TrayIconEvent::set_event_handler` and `MenuEvent::set_event_handler` to
+    immediately awake winit's hidden event loop via `EventLoopProxy` (`request_repaint()`),
+    resolving the issue where clicking "Abrir" or the tray icon failed to restore the window.
+  - Left-clicking the tray icon restores the window cleanly without opening the popup menu
+    (`with_menu_on_left_click(false)`).
+  - Right-clicking the tray icon exclusively opens the context menu (`with_menu_on_right_click(true)`).
+  - Restoration commands issue `Visible(true)`, `Minimized(false)`, and `Focus`.
+
 ## 0.5.3 — 2026-09-16
 
 - Fix Setup crash on upgrade: `Runtime error (at …): Type Mismatch` when

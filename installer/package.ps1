@@ -1,4 +1,4 @@
-﻿# Package Game Optimizer for Windows distribution.
+# Package Game Optimizer for Windows distribution.
 #
 # Builds a release binary, copies it into dist\GameOptimizer\, and zips it.
 # Then prints how to compile the Inno Setup installer (iscc).
@@ -21,7 +21,7 @@ if (-not $ScriptDir) {
 $Root = Split-Path -Parent $ScriptDir
 if (-not $Root) { $Root = $ScriptDir }
 
-$Version = "0.5.3"
+$Version = "0.6.0"
 $ExeName = "game_optimizer.exe"
 $CargoToml = Join-Path $Root "Cargo.toml"
 if (-not (Test-Path -LiteralPath $CargoToml)) {

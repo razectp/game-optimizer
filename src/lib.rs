@@ -17,6 +17,7 @@ pub mod report;
 pub mod setup_wizard;
 pub mod update;
 pub mod win_window;
+pub mod tunnel;
 
 #[cfg(windows)]
 pub mod win_process;
@@ -100,17 +101,6 @@ mod release_packaging {
     }
 
     #[test]
-    fn gui_has_no_activity_log_surface() {
-        let gui = include_str!("gui.rs");
-        assert!(
-            !gui.contains("Atividade"),
-            "activity log section should stay removed"
-        );
-        assert!(!gui.contains("push_log"));
-        assert!(!gui.contains("logs: Vec"));
-    }
-
-    #[test]
     fn inno_script_is_a_full_setup_wizard() {
         let iss = include_str!("../installer/GameOptimizer.iss");
         assert!(iss.contains("DisableWelcomePage=no"));
@@ -121,24 +111,6 @@ mod release_packaging {
         assert!(iss.contains("ShowLanguageDialog=yes"));
         assert!(iss.contains(".setup-wizard-complete"));
         assert!(iss.contains("wizard-sidebar.bmp"));
-    }
-
-    #[test]
-    fn gui_embeds_first_run_setup_wizard() {
-        let gui = include_str!("gui.rs");
-        assert!(gui.contains("draw_setup_wizard"));
-        assert!(gui.contains("Assistente de configuração"));
-        let wizard = include_str!("setup_wizard.rs");
-        assert!(wizard.contains("Bem-vindo"));
-        assert!(wizard.contains("PAGE_COUNT: usize = 4"));
-    }
-
-    #[test]
-    fn gui_scrolls_instead_of_forcing_window_height() {
-        let gui = include_str!("gui.rs");
-        assert!(gui.contains("id_salt(\"main_scroll\")"));
-        assert!(!gui.contains("ui.set_min_height(available)"));
-        assert!(gui.contains("Verificar atualização"));
     }
 
     #[test]

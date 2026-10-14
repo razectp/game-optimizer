@@ -1,4 +1,4 @@
-﻿# Install Game Optimizer on Windows (end-user, no Rust required).
+# Install Game Optimizer on Windows (end-user, no Rust required).
 #
 # Default: copy a prebuilt game_optimizer.exe into %LOCALAPPDATA%\GameOptimizer,
 # create Start Menu / Desktop shortcuts, enable Start with Windows, and register
@@ -159,7 +159,7 @@ if (-not $InstallDir) {
 }
 
 $ExeName = "game_optimizer.exe"
-$Version = "0.5.3"
+$Version = "0.6.0"
 $Publisher = "Game Optimizer"
 
 if ($Build) {

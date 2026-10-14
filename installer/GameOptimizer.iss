@@ -1,9 +1,9 @@
-﻿; Game Optimizer — per-user Inno Setup wizard (no admin required).
+; Game Optimizer — per-user Inno Setup wizard (no admin required).
 ; Compile: iscc installer\GameOptimizer.iss
 ; Requires a release binary at ..\target\release\game_optimizer.exe
 
 #define AppName "Game Optimizer"
-#define AppVersion "0.5.3"
+#define AppVersion "0.6.0"
 #define AppPublisher "Game Optimizer"
 #define AppExeName "game_optimizer.exe"
 #define AppMutexName "GameOptimizer"
@@ -131,7 +131,7 @@ Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; Description: "{cm:LaunchPr
 
 [Code]
 const
-  SetupVersion = '0.5.3';
+  SetupVersion = '0.6.0';
   SetupExeName = 'game_optimizer.exe';
 
 var

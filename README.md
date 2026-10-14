@@ -19,11 +19,11 @@ if the window was maximized. Start with Windows is enabled by default.
 No Rust toolchain is required. Download a packaged build from
 [GitHub Releases](https://github.com/razectp/game-optimizer/releases):
 
-1. **Setup (recommended):** run `GameOptimizer-0.5.3-setup.exe` and follow the
+1. **Setup (recommended):** run `GameOptimizer-0.6.0-setup.exe` and follow the
    setup wizard (language, welcome, license, folder, shortcuts). Over an
    existing install it shows an update page and asks to close the running app.
-2. **Portable:** run `GameOptimizer-0.5.3.exe`, or extract
-   `GameOptimizer-0.5.3-windows.zip` and install:
+2. **Portable:** run `GameOptimizer-0.6.0.exe`, or extract
+   `GameOptimizer-0.6.0-windows.zip` and install:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -75,6 +75,9 @@ cargo build --release
 .\target\release\game_optimizer.exe autostart
 .\target\release\game_optimizer.exe autostart --on
 .\target\release\game_optimizer.exe autostart --off
+.\target\release\game_optimizer.exe tunnel
+.\target\release\game_optimizer.exe tunnel --ping
+.\target\release\game_optimizer.exe tunnel --export-conf .\GameOptTunnel.conf
 ```
 
 Requires Rust stable 1.85+.
@@ -90,6 +93,14 @@ Requires Rust stable 1.85+.
 | CPU-set / affinity partition | Split cores across multi-instance games |
 | Non-game WS trim | Reclaims **browsers only** (Chrome/Edge/Firefox/…) |
 | Trim memória do jogo | Optional empty of game working sets |
+| Tunelamento VPS (WireGuard) | Roteia exclusivamente as conexões dos jogos pela VPS (zero injeção de DLL, seguro contra anti-cheats) |
+
+## Tunelamento WireGuard (VPS)
+
+Permite acelerar rotas de jogos usando uma VPS própria com WireGuard:
+- **Isolamento por PID:** O programa monitora a tabela de sockets do Windows (`iphlpapi.dll`). Quando um jogo abre conexão para um servidor, apenas o tráfego daquele destino é roteado pela VPS. Navegadores, Discord e o resto do sistema continuam na internet normal.
+- **Zero injeção de DLL:** Não toca na memória nem nos arquivos do jogo, sendo 100% seguro contra anti-cheats (Vanguard, EAC, BattlEye, Ricochet).
+- **Configuração Embutida:** Configure pela interface gráfica (`🛡️ Túnel VPS`) ou no `games.toml`.
 
 The GUI can also clean the **user Temp / INetCache** folders (confirm in the
 UI). Shader caches, Prefetch, and Windows Update files are never touched.

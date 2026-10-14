@@ -73,6 +73,15 @@ enum Commands {
         #[arg(long)]
         off: bool,
     },
+    /// Manage and inspect the embedded WireGuard VPS game tunnel.
+    Tunnel {
+        /// Test latency to the VPS endpoint.
+        #[arg(long)]
+        ping: bool,
+        /// Export a standard WireGuard .conf file for the embedded configuration.
+        #[arg(long)]
+        export_conf: Option<PathBuf>,
+    },
 }
 
 fn apply_cli_overrides(mut config: AppConfig, trim_game_memory: bool) -> AppConfig {
@@ -91,7 +100,7 @@ fn main() -> anyhow::Result<()> {
             let _ = win_window::restore_main_window(false);
             return Ok(());
         }
-        return gui::run(cli.config, cli.setup).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
+        return gui::run(cli.config).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
     }
 
     let config = AppConfig::load_or_default(&cli.config)?;
@@ -162,6 +171,44 @@ fn main() -> anyhow::Result<()> {
             }
             autostart::set_enabled(on)?;
             println!("Auto-start {}", if on { "enabled" } else { "disabled" });
+        }
+        Commands::Tunnel { ping, export_conf } => {
+            let wg = &config.wireguard;
+            println!("=== Tunelamento WireGuard (VPS) ===");
+            println!(
+                "Status configurado: {}",
+                if wg.is_configured() {
+                    "Sim"
+                } else {
+                    "Incompleto"
+                }
+            );
+            println!("Habilitado: {}", if wg.enabled { "Sim" } else { "Não" });
+            println!(
+                "Endpoint: {}",
+                if wg.endpoint.is_empty() {
+                    "(não definido)"
+                } else {
+                    &wg.endpoint
+                }
+            );
+            println!("IP do Cliente na VPN: {}", wg.tunnel_ip);
+            println!("Gateway VPS: {}", wg.tunnel_gateway);
+
+            if ping {
+                println!("\nTestando ping para o endpoint da VPS...");
+                match wg.ping_vps(Duration::from_millis(2000)) {
+                    Ok(ms) => println!("Sucesso! Latência VPS: {ms}ms"),
+                    Err(err) => println!("Falha no teste de ping: {err}"),
+                }
+            }
+
+            if let Some(path) = export_conf {
+                match wg.write_conf_file(&path) {
+                    Ok(p) => println!("\nConfiguração salva em: {}", p.display()),
+                    Err(err) => eprintln!("Erro ao salvar arquivo de configuração: {err}"),
+                }
+            }
         }
     }
 

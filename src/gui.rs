@@ -9,42 +9,38 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, RichText, Sense,
-    Stroke, Vec2, ViewportCommand,
+    Stroke, Vec2,
 };
 use eframe::{App, Frame, NativeOptions};
 use image::{ImageBuffer, Rgba};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::autostart;
-use crate::cache::{self, CacheCleanReport};
 use crate::config::AppConfig;
 use crate::optimize::{optimize_system, OptimizeReport, OptimizeRequest};
 use crate::report::format_mib;
-use crate::setup_wizard::{self, SetupWizard};
-use crate::update::{self, UpdateInfo};
-use crate::win_window;
+use crate::tunnel::{TunnelStatus, WireGuardConfig};
 
-/// Warm amber — primary actions.
-const ACCENT: Color32 = Color32::from_rgb(240, 176, 72);
-const ACCENT_SOFT: Color32 = Color32::from_rgb(72, 52, 24);
-const OK: Color32 = Color32::from_rgb(120, 186, 140);
-const BG: Color32 = Color32::from_rgb(28, 26, 24);
-const BG_RAISED: Color32 = Color32::from_rgb(42, 38, 34);
-const BG_ROW: Color32 = Color32::from_rgb(54, 48, 42);
-const STROKE: Color32 = Color32::from_rgb(72, 64, 56);
-const TEXT: Color32 = Color32::from_rgb(250, 246, 238);
-const MUTED: Color32 = Color32::from_rgb(168, 158, 146);
-const WARN: Color32 = Color32::from_rgb(220, 150, 80);
+/// Warm amber — primary actions / brand energy.
+const ACCENT: Color32 = Color32::from_rgb(245, 158, 11);
+const ACCENT_SOFT: Color32 = Color32::from_rgb(58, 42, 18);
+/// Calm emerald for “all good” status.
+const OK: Color32 = Color32::from_rgb(16, 185, 129);
+const BG: Color32 = Color32::from_rgb(15, 17, 22);
+const BG_RAISED: Color32 = Color32::from_rgb(22, 26, 34);
+const BG_ROW: Color32 = Color32::from_rgb(30, 35, 46);
+const STROKE: Color32 = Color32::from_rgb(45, 52, 66);
+const TEXT: Color32 = Color32::from_rgb(243, 244, 246);
+const MUTED: Color32 = Color32::from_rgb(156, 163, 175);
+const WARN: Color32 = Color32::from_rgb(249, 115, 22);
+const TUNNEL_COLOR: Color32 = Color32::from_rgb(56, 189, 248);
 
 enum WorkerMsg {
     Report(OptimizeReport),
-    Status(String),
+    Log(String),
     Watching(bool),
-    Cache(CacheCleanReport),
-    Busy(bool),
-    Update(Result<Option<UpdateInfo>, String>),
-    UpdateDownload(Result<PathBuf, String>),
+    Tunnel(TunnelStatus),
 }
 
 enum UiCmd {
@@ -52,42 +48,62 @@ enum UiCmd {
     Scan,
     StartWatch { interval: u64, trim_game: bool },
     StopWatch,
-    CleanCache,
-    CheckUpdate,
-    InstallUpdate { url: String },
+    UpdateWireGuard(WireGuardConfig),
+    TestVpsPing,
 }
 
-struct TraySignals {
-    show: AtomicBool,
-    optimize: AtomicBool,
-    quit: AtomicBool,
+enum AppTrayEvent {
+    Menu(MenuEvent),
+    Tray(TrayIconEvent),
 }
 
 /// Launch the native GUI (blocks until quit).
-pub fn run(config_path: PathBuf, force_setup: bool) -> eframe::Result<()> {
+pub fn run(config_path: PathBuf) -> eframe::Result<()> {
     let icon = tray_rgba_icon();
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([840.0, 640.0])
-            .with_min_inner_size([640.0, 480.0])
-            .with_title(win_window::WINDOW_TITLE)
+            .with_inner_size([880.0, 560.0])
+            .with_min_inner_size([780.0, 500.0])
+            .with_title("Game Optimizer")
             .with_icon(eframe_icon()),
         ..Default::default()
     };
+
+    let (tray_tx, tray_rx) = mpsc::channel::<AppTrayEvent>();
 
     eframe::run_native(
         "Game Optimizer",
         options,
         Box::new(move |cc| {
+            let ctx_tray = cc.egui_ctx.clone();
+            let tx_tray = tray_tx.clone();
+            TrayIconEvent::set_event_handler(Some(move |event| {
+                let _ = tx_tray.send(AppTrayEvent::Tray(event));
+                ctx_tray.request_repaint();
+            }));
+
+            let ctx_menu = cc.egui_ctx.clone();
+            let tx_menu = tray_tx;
+            MenuEvent::set_event_handler(Some(move |event| {
+                let _ = tx_menu.send(AppTrayEvent::Menu(event));
+                ctx_menu.request_repaint();
+            }));
+
             install_fonts(&cc.egui_ctx);
             style_visuals(&cc.egui_ctx);
-            Ok(Box::new(GuiApp::new(config_path, icon, force_setup)) as Box<dyn App>)
+            Ok(Box::new(GuiApp::new(
+                config_path,
+                icon,
+                tray_rx,
+                cc.egui_ctx.clone(),
+            )) as Box<dyn App>)
         }),
     )
 }
 
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
+    // Prefer Windows Segoe UI for a friendlier native feel.
     let candidates = [
         r"C:\Windows\Fonts\segoeui.ttf",
         r"C:\Windows\Fonts\calibri.ttf",
@@ -114,55 +130,39 @@ fn style_visuals(ctx: &egui::Context) {
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, STROKE);
     visuals.widgets.inactive.bg_fill = BG_ROW;
     visuals.widgets.inactive.weak_bg_fill = BG_RAISED;
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(68, 60, 52);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(45, 52, 66);
     visuals.widgets.active.bg_fill = ACCENT_SOFT;
     visuals.selection.bg_fill = ACCENT_SOFT;
-    visuals.extreme_bg_color = BG_RAISED;
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(10);
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(10);
-    visuals.widgets.active.corner_radius = CornerRadius::same(10);
+    visuals.extreme_bg_color = Color32::from_rgb(12, 14, 18);
+    visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
+    visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
+    visuals.widgets.active.corner_radius = CornerRadius::same(8);
     ctx.set_visuals(visuals);
 
     ctx.style_mut_of(egui::Theme::Dark, |style| {
-        style.spacing.item_spacing = Vec2::new(10.0, 8.0);
-        style.spacing.button_padding = Vec2::new(14.0, 8.0);
+        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+        style.spacing.button_padding = Vec2::new(12.0, 7.0);
         style.spacing.window_margin = egui::Margin::same(0);
         style.spacing.indent = 12.0;
     });
 }
 
-fn brand_icon_rgba(size: u32) -> Vec<u8> {
-    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
-    let cx = size as f32 / 2.0 - 0.5;
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cx;
-            let r = (dx * dx + dy * dy).sqrt();
-            let outer = size as f32 / 2.0;
-            let inner = outer - 2.0;
-            if r < inner - 4.0 {
-                rgba.extend_from_slice(&[240, 176, 72, 255]);
-            } else if r < inner {
-                rgba.extend_from_slice(&[28, 26, 24, 255]);
-            } else if r < outer {
-                rgba.extend_from_slice(&[240, 176, 72, 80]);
-            } else {
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
-            }
-        }
-    }
-    rgba
-}
-
 fn tray_rgba_icon() -> Icon {
     let size = 32u32;
     let mut img = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(size, size);
-    let raw = brand_icon_rgba(size);
     for y in 0..size {
         for x in 0..size {
-            let i = ((y * size + x) * 4) as usize;
-            img.put_pixel(x, y, Rgba([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]));
+            let dx = x as f32 - 15.5;
+            let dy = y as f32 - 15.5;
+            let r = (dx * dx + dy * dy).sqrt();
+            let pixel = if r < 14.0 {
+                Rgba([232, 168, 56, 255])
+            } else if r < 16.0 {
+                Rgba([22, 24, 28, 255])
+            } else {
+                Rgba([0, 0, 0, 0])
+            };
+            img.put_pixel(x, y, pixel);
         }
     }
     Icon::from_rgba(img.into_raw(), size, size).expect("tray icon")
@@ -170,49 +170,74 @@ fn tray_rgba_icon() -> Icon {
 
 fn eframe_icon() -> egui::IconData {
     let size = 32u32;
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - 15.5;
+            let dy = y as f32 - 15.5;
+            let r = (dx * dx + dy * dy).sqrt();
+            if r < 14.0 {
+                rgba.extend_from_slice(&[232, 168, 56, 255]);
+            } else if r < 16.0 {
+                rgba.extend_from_slice(&[22, 24, 28, 255]);
+            } else {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+    }
     egui::IconData {
-        rgba: brand_icon_rgba(size),
+        rgba,
         width: size,
         height: size,
     }
 }
 
+fn paint_bg(ui: &egui::Ui) {
+    let rect = ui.max_rect();
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0.0, BG);
+    // Soft warm glow top-left (atmosphere without flat fill).
+    let glow = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * 0.55, 120.0));
+    painter.rect_filled(glow, 0.0, Color32::from_rgba_unmultiplied(232, 168, 56, 18));
+}
+
 struct GuiApp {
+    config_path: PathBuf,
     report: Option<OptimizeReport>,
-    status: String,
+    logs: Vec<String>,
     watching: bool,
     watch_interval: u64,
     trim_game_memory: bool,
     autostart: bool,
-    busy: bool,
-    in_tray: bool,
-    restore_maximized: bool,
-    cache_armed: bool,
-    tray_pump_started: bool,
+    start_minimized_hint: bool,
+    wireguard_cfg: WireGuardConfig,
+    tunnel_status: Option<TunnelStatus>,
+    show_tunnel_modal: bool,
+    /// Must stay owned so the tray icon is not destroyed.
     #[allow(dead_code)]
     tray: Option<TrayIcon>,
     tray_show: MenuItem,
     tray_optimize: MenuItem,
     tray_quit: MenuItem,
-    tray_signals: Arc<TraySignals>,
     ui_tx: Sender<UiCmd>,
     worker_rx: Receiver<WorkerMsg>,
+    tray_rx: Receiver<AppTrayEvent>,
     watch_flag: Arc<AtomicBool>,
-    wizard: Option<SetupWizard>,
-    update: Option<UpdateInfo>,
-    update_dismissed: bool,
-    update_busy: bool,
+    started: Instant,
 }
 
 impl GuiApp {
-    fn new(config_path: PathBuf, icon: Icon, force_setup: bool) -> Self {
-        autostart::remove_duplicate_entries();
-        let show_wizard = setup_wizard::should_show(force_setup);
-        let autostart = if show_wizard {
-            autostart::is_enabled() || !autostart::initialized_marker_exists()
-        } else {
-            autostart::ensure_default_enabled().unwrap_or_else(|_| autostart::is_enabled())
-        };
+    fn new(
+        config_path: PathBuf,
+        icon: Icon,
+        tray_rx: Receiver<AppTrayEvent>,
+        ctx: egui::Context,
+    ) -> Self {
+        let autostart =
+            autostart::ensure_default_enabled().unwrap_or_else(|_| autostart::is_enabled());
+
+        let initial_cfg = AppConfig::load_or_default(&config_path).unwrap_or_default();
+        let wireguard_cfg = initial_cfg.wireguard;
 
         let menu = Menu::new();
         let tray_show = MenuItem::new("Abrir Game Optimizer", true, None);
@@ -226,6 +251,8 @@ impl GuiApp {
 
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(true)
             .with_tooltip("Game Optimizer")
             .with_icon(icon)
             .build()
@@ -239,84 +266,41 @@ impl GuiApp {
             ui_rx,
             worker_tx,
             Arc::clone(&watch_flag),
+            ctx,
         );
 
         let app = Self {
+            config_path,
             report: None,
-            status: "Pronto para otimizar seus jogos.".into(),
+            logs: vec!["Pronto. O X ou botão Bandeja minimizam para a bandeja.".into()],
             watching: false,
             watch_interval: 45,
             trim_game_memory: false,
             autostart,
-            busy: false,
-            in_tray: false,
-            restore_maximized: false,
-            cache_armed: false,
-            tray_pump_started: false,
+            start_minimized_hint: false,
+            wireguard_cfg,
+            tunnel_status: None,
+            show_tunnel_modal: false,
             tray,
             tray_show,
             tray_optimize,
             tray_quit,
-            tray_signals: Arc::new(TraySignals {
-                show: AtomicBool::new(false),
-                optimize: AtomicBool::new(false),
-                quit: AtomicBool::new(false),
-            }),
             ui_tx,
             worker_rx,
+            tray_rx,
             watch_flag,
-            wizard: if show_wizard {
-                Some(SetupWizard::new(autostart, true))
-            } else {
-                None
-            },
-            update: None,
-            update_dismissed: false,
-            update_busy: false,
+            started: Instant::now(),
         };
         let _ = app.ui_tx.send(UiCmd::Scan);
-        let _ = app.ui_tx.send(UiCmd::CheckUpdate);
         app
     }
 
-    fn snapshot_maximized(&mut self, ctx: &egui::Context) {
-        self.restore_maximized = win_window::remembered_maximized(
-            ctx.input(|i| i.viewport().maximized),
-            win_window::is_main_window_maximized(),
-        );
-    }
-
-    fn hide_to_tray(&mut self, ctx: &egui::Context) {
-        self.snapshot_maximized(ctx);
-        self.in_tray = true;
-        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-        let _ = win_window::hide_main_window();
-    }
-
-    fn restore_from_tray(&mut self, ctx: &egui::Context) {
-        self.in_tray = false;
-        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-        ctx.send_viewport_cmd(ViewportCommand::Maximized(self.restore_maximized));
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
-        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
-        let _ = win_window::restore_main_window(self.restore_maximized);
-        ctx.request_repaint();
-    }
-
-    fn ensure_tray_pump(&mut self, ctx: &egui::Context) {
-        if self.tray_pump_started {
-            return;
+    fn push_log(&mut self, line: impl AsRef<str>) {
+        self.logs.push(line.as_ref().to_owned());
+        if self.logs.len() > 80 {
+            let drain = self.logs.len() - 80;
+            self.logs.drain(0..drain);
         }
-        self.tray_pump_started = true;
-        spawn_tray_pump(
-            ctx.clone(),
-            Arc::clone(&self.tray_signals),
-            self.tray_show.id().clone(),
-            self.tray_optimize.id().clone(),
-            self.tray_quit.id().clone(),
-        );
     }
 
     fn poll_worker(&mut self) {
@@ -325,453 +309,147 @@ impl GuiApp {
                 WorkerMsg::Report(report) => {
                     self.report = Some(report);
                 }
-                WorkerMsg::Status(line) => self.status = line,
+                WorkerMsg::Log(line) => self.push_log(line),
                 WorkerMsg::Watching(active) => {
                     self.watching = active;
-                    self.status = if active {
-                        "Cuidando dos jogos em segundo plano.".into()
-                    } else {
-                        "Pausado. Toque em Otimizar quando quiser.".into()
-                    };
                 }
-                WorkerMsg::Cache(report) => {
-                    self.status = report.friendly_summary();
-                    self.cache_armed = false;
-                }
-                WorkerMsg::Busy(busy) => self.busy = busy,
-                WorkerMsg::Update(Ok(Some(info))) => {
-                    self.update_busy = false;
-                    self.status = format!(
-                        "Nova versão {} disponível (você tem {}).",
-                        info.latest, info.current
-                    );
-                    self.update = Some(info);
-                    self.update_dismissed = false;
-                    self.set_tray_tooltip("Game Optimizer — atualização disponível");
-                }
-                WorkerMsg::Update(Ok(None)) => {
-                    self.update_busy = false;
-                    self.update = None;
-                    self.set_tray_tooltip("Game Optimizer");
-                    if self.status.starts_with("Verificando atualização") {
-                        self.status = "Este Game Optimizer já está na última versão.".into();
-                    }
-                }
-                WorkerMsg::Update(Err(err)) => {
-                    self.update_busy = false;
-                    self.status = format!("Não foi possível verificar atualização: {err}");
-                }
-                WorkerMsg::UpdateDownload(Ok(path)) => {
-                    self.update_busy = false;
-                    match update::launch_setup(&path) {
-                        Ok(()) => {
-                            self.status = "Instalador aberto. Feche o app se o setup pedir.".into();
-                        }
-                        Err(err) => {
-                            self.status = format!("Não foi possível abrir o instalador: {err}");
-                        }
-                    }
-                }
-                WorkerMsg::UpdateDownload(Err(err)) => {
-                    self.update_busy = false;
-                    self.status = format!("Download da atualização falhou: {err}");
+                WorkerMsg::Tunnel(status) => {
+                    self.tunnel_status = Some(status);
                 }
             }
         }
     }
 
-    fn poll_tray_signals(&mut self, ctx: &egui::Context) {
-        if self.tray_signals.show.swap(false, Ordering::SeqCst) {
-            self.restore_from_tray(ctx);
-        }
-        if self.tray_signals.optimize.swap(false, Ordering::SeqCst) {
-            let _ = self.ui_tx.send(UiCmd::Optimize {
-                trim_game: self.trim_game_memory,
-            });
-        }
-        if self.tray_signals.quit.swap(false, Ordering::SeqCst) {
-            self.watch_flag.store(false, Ordering::SeqCst);
-            std::process::exit(0);
+    fn poll_tray(&mut self, ctx: &egui::Context) {
+        while let Ok(event) = self.tray_rx.try_recv() {
+            match event {
+                AppTrayEvent::Menu(ev) => {
+                    if ev.id == self.tray_show.id() {
+                        self.restore_window(ctx);
+                    } else if ev.id == self.tray_optimize.id() {
+                        let _ = self.ui_tx.send(UiCmd::Optimize {
+                            trim_game: self.trim_game_memory,
+                        });
+                    } else if ev.id == self.tray_quit.id() {
+                        self.watch_flag.store(false, Ordering::SeqCst);
+                        std::process::exit(0);
+                    }
+                }
+                AppTrayEvent::Tray(ev) => match ev {
+                    TrayIconEvent::Click {
+                        button: tray_icon::MouseButton::Left,
+                        ..
+                    }
+                    | TrayIconEvent::DoubleClick {
+                        button: tray_icon::MouseButton::Left,
+                        ..
+                    } => {
+                        self.restore_window(ctx);
+                    }
+                    _ => {}
+                },
+            }
         }
     }
 
-    fn set_tray_tooltip(&self, text: &str) {
-        if let Some(tray) = &self.tray {
-            let _ = tray.set_tooltip(Some(text));
-        }
+    fn restore_window(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
     }
 
     fn game_count(&self) -> usize {
         self.report.as_ref().map(|r| r.games.len()).unwrap_or(0)
     }
-
-    fn reclaim_count(&self) -> usize {
-        self.report
-            .as_ref()
-            .map(|r| r.reclaim_candidates.len())
-            .unwrap_or(0)
-    }
 }
 
 impl App for GuiApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        self.ensure_tray_pump(ctx);
         self.poll_worker();
-        self.poll_tray_signals(ctx);
+        self.poll_tray(ctx);
 
         let close_requested = ctx.input(|i| i.viewport().close_requested());
         if close_requested {
-            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            self.hide_to_tray(ctx);
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            if !self.start_minimized_hint {
+                self.push_log("Na bandeja do sistema. Clique no ícone para reabrir.");
+                self.start_minimized_hint = true;
+            }
         }
 
-        // Keep the event loop alive only while hidden so tray clicks restore
-        // without a constant idle repaint when the window is visible.
-        if self.in_tray {
-            ctx.request_repaint_after(Duration::from_millis(200));
-        }
+        ctx.request_repaint_after(Duration::from_millis(200));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut Frame) {
         let ctx = ui.ctx().clone();
-        let rect = ui.max_rect();
-        ui.painter().rect_filled(rect, 0.0, BG);
-        let glow = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * 0.6, 140.0));
-        ui.painter()
-            .rect_filled(glow, 0.0, Color32::from_rgba_unmultiplied(240, 176, 72, 16));
+        paint_bg(ui);
 
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(Color32::TRANSPARENT)
-                    .inner_margin(egui::Margin::symmetric(20, 16)),
+                    .inner_margin(egui::Margin::symmetric(16, 12)),
             )
             .show(ui, |ui| {
-                if self.wizard.is_some() {
-                    egui::ScrollArea::vertical()
-                        .id_salt("wizard_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            self.draw_setup_wizard(ui);
-                        });
-                } else {
-                    self.draw_header(ui, &ctx);
-                    self.draw_update_banner(ui);
-                    ui.add_space(10.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("main_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            self.draw_body(ui, &ctx);
-                        });
-                }
+                self.draw_header(ui, &ctx);
+                ui.add_space(10.0);
+                self.draw_body(ui, &ctx);
             });
+
+        if self.show_tunnel_modal {
+            self.draw_tunnel_modal(&ctx);
+        }
     }
 }
 
 impl GuiApp {
-    fn finish_setup_wizard(&mut self) {
-        let Some(wizard) = self.wizard.take() else {
-            return;
-        };
-        self.autostart = wizard.autostart;
-        match autostart::set_enabled(wizard.autostart) {
-            Ok(()) => {
-                self.status = if wizard.autostart {
-                    "Vai abrir junto com o Windows.".into()
-                } else {
-                    "Não abre automaticamente com o Windows.".into()
-                };
-            }
-            Err(err) => {
-                self.status = format!("Não foi possível alterar o início: {err}");
-            }
-        }
-        if let Err(err) = setup_wizard::mark_complete() {
-            self.status = format!("Não foi possível gravar o assistente: {err}");
-        }
-        if wizard.start_watching {
-            let _ = self.ui_tx.send(UiCmd::StartWatch {
-                interval: self.watch_interval,
-                trim_game: self.trim_game_memory,
-            });
-        }
-    }
-
-    fn draw_setup_wizard(&mut self, ui: &mut egui::Ui) {
-        let mut finished = false;
-        let mut skipped = false;
-
-        ui.vertical_centered(|ui| {
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new("Assistente de configuração")
-                    .font(FontId::new(13.0, FontFamily::Proportional))
-                    .color(MUTED),
-            );
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("Game Optimizer")
-                    .font(FontId::new(26.0, FontFamily::Proportional))
-                    .color(TEXT)
-                    .strong(),
-            );
-        });
-
-        ui.add_space(16.0);
-        ui.horizontal(|ui| {
-            let remaining = ui.available_width();
-            ui.add_space(((remaining - 168.0) / 2.0).max(0.0));
-            let page = self.wizard.as_ref().map(|w| w.page).unwrap_or(0);
-            for i in 0..setup_wizard::PAGE_COUNT {
-                let active = i == page;
-                let done = i < page;
-                let color = if active {
-                    ACCENT
-                } else if done {
-                    OK
-                } else {
-                    STROKE
-                };
-                let mark = ui.allocate_response(Vec2::splat(22.0), Sense::hover());
-                ui.painter()
-                    .circle_filled(mark.rect.center(), 9.0, color.gamma_multiply(0.35));
-                ui.painter().circle_filled(
-                    mark.rect.center(),
-                    5.0,
-                    if active || done { color } else { MUTED },
-                );
-                if i + 1 < setup_wizard::PAGE_COUNT {
-                    ui.add_space(8.0);
-                }
-            }
-        });
-
-        ui.add_space(18.0);
-
-        let copy = self
-            .wizard
-            .as_ref()
-            .map(SetupWizard::copy)
-            .unwrap_or(setup_wizard::page_copy(0));
-        let on_prefs = self.wizard.as_ref().map(|w| w.page).unwrap_or(0) == 2;
-
-        egui::Frame::new()
-            .fill(BG_RAISED)
-            .stroke(Stroke::new(1.0, STROKE))
-            .corner_radius(16.0)
-            .inner_margin(egui::Margin::symmetric(22, 20))
-            .show(ui, |ui| {
-                ui.label(RichText::new(copy.title).color(TEXT).size(20.0).strong());
-                ui.add_space(10.0);
-                ui.label(RichText::new(copy.body).color(MUTED).size(14.5));
-
-                if on_prefs {
-                    if let Some(wizard) = self.wizard.as_mut() {
-                        ui.add_space(16.0);
-                        ui.checkbox(
-                            &mut wizard.autostart,
-                            RichText::new("Iniciar com o Windows (recomendado)")
-                                .color(TEXT)
-                                .size(14.0),
-                        );
-                        ui.add_space(6.0);
-                        ui.checkbox(
-                            &mut wizard.start_watching,
-                            RichText::new("Começar a cuidar dos jogos agora")
-                                .color(TEXT)
-                                .size(14.0),
-                        );
-                    }
-                }
-            });
-
-        ui.add_space(20.0);
-        ui.horizontal(|ui| {
-            let can_back = self
-                .wizard
-                .as_ref()
-                .map(SetupWizard::can_go_back)
-                .unwrap_or(false);
-            let is_last = self
-                .wizard
-                .as_ref()
-                .map(SetupWizard::is_last)
-                .unwrap_or(false);
-
-            if ui
-                .add_enabled(
-                    can_back,
-                    egui::Button::new(RichText::new("Voltar").color(TEXT))
-                        .fill(BG_ROW)
-                        .corner_radius(9.0)
-                        .min_size(Vec2::new(110.0, 36.0)),
-                )
-                .clicked()
-            {
-                if let Some(wizard) = self.wizard.as_mut() {
-                    wizard.back();
-                }
-            }
-
-            if ui
-                .add(
-                    egui::Button::new(RichText::new("Pular").color(MUTED).size(13.0))
-                        .fill(Color32::TRANSPARENT)
-                        .corner_radius(9.0)
-                        .min_size(Vec2::new(90.0, 36.0)),
-                )
-                .clicked()
-            {
-                skipped = true;
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let next_label = if is_last { "Concluir" } else { "Continuar" };
-                if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new(next_label)
-                                .strong()
-                                .size(15.0)
-                                .color(Color32::from_rgb(32, 24, 12)),
-                        )
-                        .fill(ACCENT)
-                        .corner_radius(9.0)
-                        .min_size(Vec2::new(140.0, 36.0)),
-                    )
-                    .clicked()
-                {
-                    if is_last {
-                        finished = true;
-                    } else if let Some(wizard) = self.wizard.as_mut() {
-                        wizard.next();
-                    }
-                }
-            });
-        });
-
-        if skipped || finished {
-            self.finish_setup_wizard();
-        }
-    }
-
-    fn draw_update_banner(&mut self, ui: &mut egui::Ui) {
-        if self.update_dismissed {
-            return;
-        }
-        let Some(info) = self.update.clone() else {
-            return;
-        };
-        ui.add_space(10.0);
-        egui::Frame::new()
-            .fill(Color32::from_rgb(64, 48, 28))
-            .stroke(Stroke::new(1.0, ACCENT))
-            .corner_radius(12.0)
-            .inner_margin(egui::Margin::symmetric(14, 10))
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "Nova versão {} disponível — você tem {}.",
-                        info.latest, info.current
-                    ))
-                    .color(ACCENT)
-                    .size(14.0)
-                    .strong(),
-                );
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    let install_label = if self.update_busy {
-                        "Baixando…"
-                    } else {
-                        "Atualizar agora"
-                    };
-                    if ui
-                        .add_enabled(
-                            !self.update_busy,
-                            egui::Button::new(
-                                RichText::new(install_label)
-                                    .color(Color32::from_rgb(32, 24, 12))
-                                    .strong(),
-                            )
-                            .fill(ACCENT)
-                            .corner_radius(8.0)
-                            .min_size(Vec2::new(150.0, 32.0)),
-                        )
-                        .clicked()
-                    {
-                        self.start_update_install(&info);
-                    }
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("Depois").color(MUTED).size(13.0))
-                                .fill(BG_ROW)
-                                .corner_radius(8.0),
-                        )
-                        .clicked()
-                    {
-                        self.update_dismissed = true;
-                        self.set_tray_tooltip("Game Optimizer");
-                    }
-                });
-            });
-    }
-
-    fn start_update_install(&mut self, info: &UpdateInfo) {
-        self.update_busy = true;
-        if let Some(url) = info.setup_url.clone() {
-            self.status = "Baixando o instalador da nova versão…".into();
-            let _ = self.ui_tx.send(UiCmd::InstallUpdate { url });
-        } else {
-            self.update_busy = false;
-            match update::open_release_page(&info.html_url) {
-                Ok(()) => {
-                    self.status = "Abri a página da versão nova no navegador.".into();
-                }
-                Err(err) => {
-                    self.status = format!("Não foi possível abrir a página da versão: {err}");
-                }
-            }
-        }
-    }
-
     fn draw_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let pulse = ((self.started.elapsed().as_secs_f32() * 1.6).sin() + 1.0) * 0.5;
+        let brand_glow = Color32::from_rgba_unmultiplied(
+            ACCENT.r(),
+            ACCENT.g(),
+            ACCENT.b(),
+            35 + (pulse * 45.0) as u8,
+        );
+
         ui.horizontal(|ui| {
+            // Brand mark
             let mark = ui.allocate_response(Vec2::splat(32.0), Sense::hover());
-            ui.painter()
-                .circle_filled(mark.rect.center(), 13.0, ACCENT_SOFT);
-            ui.painter().circle_filled(mark.rect.center(), 8.0, ACCENT);
+            ui.painter().circle_filled(mark.rect.center(), 14.0, brand_glow);
+            ui.painter().circle_filled(mark.rect.center(), 9.0, ACCENT);
 
             ui.add_space(8.0);
             ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Game Optimizer")
+                            .font(FontId::new(21.0, FontFamily::Proportional))
+                            .color(TEXT)
+                            .strong(),
+                    );
+                    ui.add_space(6.0);
+                    status_chip(ui, self.watching);
+                });
                 ui.label(
-                    RichText::new("Game Optimizer")
-                        .font(FontId::new(22.0, FontFamily::Proportional))
-                        .color(TEXT)
-                        .strong(),
-                );
-                ui.label(
-                    RichText::new(format!(
-                        "Seus jogos, mais fluidos — v{}",
-                        env!("CARGO_PKG_VERSION")
-                    ))
-                    .color(MUTED)
-                    .size(13.0),
+                    RichText::new("Tunelamento VPS Autônomo & Acelerador de Jogos")
+                        .color(MUTED)
+                        .size(12.0),
                 );
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let primary = ui.add_enabled(
-                    !self.busy,
+                let primary = ui.add_sized(
+                    [150.0, 36.0],
                     egui::Button::new(
-                        RichText::new("Otimizar")
+                        RichText::new("⚡ Otimizar Agora")
                             .strong()
-                            .size(15.0)
-                            .color(Color32::from_rgb(32, 24, 12)),
+                            .size(13.0)
+                            .color(Color32::from_rgb(18, 14, 8)),
                     )
                     .fill(ACCENT)
-                    .corner_radius(10.0)
-                    .min_size(Vec2::new(132.0, 38.0)),
+                    .corner_radius(8.0),
                 );
                 if primary.clicked() {
                     let _ = self.ui_tx.send(UiCmd::Optimize {
@@ -779,309 +457,307 @@ impl GuiApp {
                     });
                 }
 
-                ui.add_space(8.0);
-                status_chip(ui, self.watching);
+                ui.add_space(6.0);
+
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("Bandeja").color(MUTED).size(12.0))
+                            .fill(BG_RAISED)
+                            .stroke(Stroke::new(1.0, STROKE))
+                            .corner_radius(6.0),
+                    )
+                    .on_hover_text("Minimizar para a bandeja do sistema")
+                    .clicked()
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
             });
         });
 
-        ui.add_space(12.0);
+        ui.add_space(10.0);
+        // Metric KPI strip
         ui.horizontal(|ui| {
-            metric_pill(ui, "Jogos abertos", &self.game_count().to_string(), ACCENT);
-            metric_pill(ui, "Navegadores", &self.reclaim_count().to_string(), OK);
+            metric_pill(ui, "🎮 Jogos", &self.game_count().to_string(), ACCENT);
+            let (trim_label, trim_color) = if self.trim_game_memory {
+                ("Ativo (Jogos)", OK)
+            } else {
+                ("Desativado", MUTED)
+            };
+            metric_pill(ui, "🧹 Trim no Jogo", trim_label, trim_color);
+            metric_pill(
+                ui,
+                "⏱️ Intervalo",
+                &format!("{}s", self.watch_interval),
+                MUTED,
+            );
+
+            let (tunnel_label, tunnel_col) = match &self.tunnel_status {
+                Some(s) if s.active => (format!("Ativo ({} rota(s))", s.active_routes_count), OK),
+                Some(s) if s.vps_ping_ms.is_some() => {
+                    (format!("Conectado ({}ms)", s.vps_ping_ms.unwrap()), TUNNEL_COLOR)
+                }
+                _ if self.wireguard_cfg.enabled => ("Pronto".into(), ACCENT),
+                _ => ("Desativado".into(), MUTED),
+            };
+
             if ui
                 .add(
-                    egui::Button::new(RichText::new("Minimizar").color(MUTED).size(12.0))
-                        .fill(BG_RAISED)
-                        .corner_radius(8.0),
+                    egui::Button::new(
+                        RichText::new(format!("🛡️ Túnel VPS: {tunnel_label}"))
+                            .color(tunnel_col)
+                            .size(12.0)
+                            .strong(),
+                    )
+                    .fill(BG_RAISED)
+                    .stroke(Stroke::new(1.0, STROKE))
+                    .corner_radius(8.0),
                 )
-                .on_hover_text("Envia para a bandeja do sistema")
+                .on_hover_text("Clique para visualizar detalhes do túnel WireGuard VPS")
                 .clicked()
             {
-                self.hide_to_tray(ctx);
+                self.show_tunnel_modal = true;
             }
         });
-
-        ui.add_space(8.0);
-        ui.label(RichText::new(&self.status).color(MUTED).size(13.0));
     }
 
     fn draw_body(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
-        section_label(ui, "Seus jogos");
-        egui::Frame::new()
-            .fill(BG_RAISED)
-            .stroke(Stroke::new(1.0, STROKE))
-            .corner_radius(14.0)
-            .inner_margin(12.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("games_list")
-                    .max_height(200.0)
-                    .auto_shrink([false, true])
+        let available = ui.available_height();
+        ui.horizontal(|ui| {
+            ui.set_min_height(available);
+
+            // Left Main column ~67%
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width() * 0.67 - 6.0);
+                ui.set_min_height(available);
+
+                section_label(ui, "JOGOS EM EXECUÇÃO");
+                egui::Frame::new()
+                    .fill(BG_RAISED)
+                    .stroke(Stroke::new(1.0, STROKE))
+                    .corner_radius(10.0)
+                    .inner_margin(12.0)
                     .show(ui, |ui| {
-                        self.draw_games(ui);
-                    });
-            });
-
-        ui.add_space(12.0);
-        section_label(ui, "Ações");
-        egui::Frame::new()
-            .fill(BG_RAISED)
-            .stroke(Stroke::new(1.0, STROKE))
-            .corner_radius(14.0)
-            .inner_margin(12.0)
-            .show(ui, |ui| {
-                let wide = ui.available_width();
-                if ui
-                    .add_enabled(
-                        !self.busy,
-                        egui::Button::new(RichText::new("Atualizar lista").color(TEXT))
-                            .fill(BG_ROW)
-                            .corner_radius(9.0)
-                            .min_size(Vec2::new(wide, 34.0)),
-                    )
-                    .clicked()
-                {
-                    let _ = self.ui_tx.send(UiCmd::Scan);
-                }
-                ui.add_space(6.0);
-                if self.watching {
-                    if ui
-                        .add_sized(
-                            [wide, 34.0],
-                            egui::Button::new(RichText::new("Parar por agora").color(TEXT))
-                                .fill(Color32::from_rgb(78, 44, 36))
-                                .corner_radius(9.0),
-                        )
-                        .clicked()
-                    {
-                        let _ = self.ui_tx.send(UiCmd::StopWatch);
-                    }
-                } else if ui
-                    .add_enabled(
-                        !self.busy,
-                        egui::Button::new(RichText::new("Manter otimizado").color(TEXT))
-                            .fill(BG_ROW)
-                            .corner_radius(9.0)
-                            .min_size(Vec2::new(wide, 34.0)),
-                    )
-                    .clicked()
-                {
-                    let _ = self.ui_tx.send(UiCmd::StartWatch {
-                        interval: self.watch_interval,
-                        trim_game: self.trim_game_memory,
-                    });
-                }
-            });
-
-        ui.add_space(12.0);
-        section_label(ui, "Opções");
-        egui::Frame::new()
-            .fill(BG_RAISED)
-            .stroke(Stroke::new(1.0, STROKE))
-            .corner_radius(14.0)
-            .inner_margin(12.0)
-            .show(ui, |ui| {
-                if ui
-                    .checkbox(
-                        &mut self.autostart,
-                        RichText::new("Iniciar com o Windows")
-                            .color(TEXT)
-                            .size(13.5),
-                    )
-                    .changed()
-                {
-                    match autostart::set_enabled(self.autostart) {
-                        Ok(()) => {
-                            self.status = if self.autostart {
-                                "Vai abrir junto com o Windows.".into()
-                            } else {
-                                "Não abre mais automaticamente.".into()
-                            };
-                        }
-                        Err(err) => {
-                            self.status = format!("Não foi possível alterar o início: {err}");
-                        }
-                    }
-                }
-
-                if self.watching {
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new("Checar a cada (segundos)")
-                            .color(MUTED)
-                            .size(12.0),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut self.watch_interval, 15..=120)
-                            .clamping(egui::SliderClamping::Always),
-                    );
-                }
-
-                ui.add_space(8.0);
-                egui::CollapsingHeader::new(RichText::new("Mais opções").color(MUTED).size(13.0))
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.add_space(4.0);
-                        ui.checkbox(
-                            &mut self.trim_game_memory,
-                            RichText::new("Liberar RAM do jogo").color(TEXT).size(13.5),
-                        );
-                        ui.label(
-                            RichText::new(
-                                "Pode dar uma travadinha. Deixe desligado se não tiver certeza.",
-                            )
-                            .color(WARN)
-                            .size(11.5),
-                        );
-
-                        ui.add_space(10.0);
-                        ui.label(
-                            RichText::new(
-                                "Limpar pasta Temp do Windows. Não apaga cache de jogos.",
-                            )
-                            .color(MUTED)
-                            .size(11.5),
-                        );
-                        ui.add_space(4.0);
-                        let cache_label = if self.cache_armed {
-                            "Confirmar limpeza"
-                        } else {
-                            "Limpar arquivos temporários"
-                        };
-                        let cache_fill = if self.cache_armed {
-                            Color32::from_rgb(96, 56, 32)
-                        } else {
-                            BG_ROW
-                        };
-                        if ui
-                            .add_enabled(
-                                !self.busy,
-                                egui::Button::new(RichText::new(cache_label).color(TEXT))
-                                    .fill(cache_fill)
-                                    .corner_radius(9.0)
-                                    .min_size(Vec2::new(ui.available_width(), 34.0)),
-                            )
-                            .clicked()
-                        {
-                            if self.cache_armed {
-                                let _ = self.ui_tx.send(UiCmd::CleanCache);
-                                self.status = "Limpando arquivos temporários…".into();
-                            } else {
-                                self.cache_armed = true;
-                                self.status =
-                                    "Toque de novo para confirmar a limpeza da pasta Temp.".into();
-                            }
-                        }
-                        if self.cache_armed
-                            && ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new("Cancelar").color(MUTED).size(12.0),
-                                    )
-                                    .fill(Color32::TRANSPARENT),
-                                )
-                                .clicked()
-                        {
-                            self.cache_armed = false;
-                            self.status = "Limpeza cancelada.".into();
-                        }
+                        let list_h = (available * 0.44).clamp(110.0, 190.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(list_h)
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                self.draw_games(ui);
+                            });
                     });
 
                 ui.add_space(10.0);
-                if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new("Assistente de configuração")
-                                .color(MUTED)
-                                .size(12.5),
-                        )
-                        .fill(BG_ROW)
-                        .corner_radius(8.0)
-                        .min_size(Vec2::new(ui.available_width(), 32.0)),
-                    )
-                    .clicked()
-                {
-                    self.wizard = Some(SetupWizard::new(self.autostart, self.watching));
-                }
-
-                ui.add_space(8.0);
-                let update_label = if self.update_busy {
-                    "Verificando…"
-                } else {
-                    "Verificar atualização"
-                };
-                if ui
-                    .add_enabled(
-                        !self.update_busy,
-                        egui::Button::new(RichText::new(update_label).color(TEXT).size(12.5))
-                            .fill(BG_ROW)
-                            .corner_radius(8.0)
-                            .min_size(Vec2::new(ui.available_width(), 32.0)),
-                    )
-                    .clicked()
-                {
-                    self.update_busy = true;
-                    self.status = "Verificando atualização…".into();
-                    let _ = self.ui_tx.send(UiCmd::CheckUpdate);
-                }
-                if let Some(info) = self.update.clone() {
-                    ui.add_space(6.0);
-                    if ui
-                        .add_enabled(
-                            !self.update_busy,
-                            egui::Button::new(
-                                RichText::new(format!("Instalar {} agora", info.latest))
-                                    .color(Color32::from_rgb(32, 24, 12))
-                                    .size(12.5)
-                                    .strong(),
-                            )
-                            .fill(ACCENT)
-                            .corner_radius(8.0)
-                            .min_size(Vec2::new(ui.available_width(), 32.0)),
-                        )
-                        .clicked()
-                    {
-                        self.start_update_install(&info);
-                    }
-                }
+                section_label(ui, "LOG DE ATIVIDADES DO TÚNEL & SISTEMA");
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(11, 13, 17))
+                    .stroke(Stroke::new(1.0, STROKE))
+                    .corner_radius(10.0)
+                    .inner_margin(10.0)
+                    .show(ui, |ui| {
+                        let rest = ui.available_height().max(90.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(rest)
+                            .auto_shrink([false; 2])
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                for line in self.logs.iter().rev().take(50).rev() {
+                                    let col = if line.contains("Túnel VPS") {
+                                        TUNNEL_COLOR
+                                    } else if line.contains("Otimização") || line.contains("ok") {
+                                        OK
+                                    } else if line.contains("Erro") || line.contains("Falha") {
+                                        WARN
+                                    } else {
+                                        MUTED
+                                    };
+                                    ui.label(RichText::new(line).color(col).size(12.0).monospace());
+                                }
+                            });
+                    });
             });
+
+            ui.add_space(10.0);
+
+            // Right Sidebar (Ações e Ajustes)
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(available);
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        section_label(ui, "AÇÕES");
+                        egui::Frame::new()
+                            .fill(BG_RAISED)
+                            .stroke(Stroke::new(1.0, STROKE))
+                            .corner_radius(10.0)
+                            .inner_margin(10.0)
+                            .show(ui, |ui| {
+                                if ui
+                                    .add_sized(
+                                        [ui.available_width(), 34.0],
+                                        egui::Button::new(
+                                            RichText::new("🔄 Atualizar Detecção").color(TEXT).strong(),
+                                        )
+                                        .fill(BG_ROW)
+                                        .stroke(Stroke::new(1.0, STROKE))
+                                        .corner_radius(7.0),
+                                    )
+                                    .clicked()
+                                {
+                                    let _ = self.ui_tx.send(UiCmd::Scan);
+                                }
+                                ui.add_space(6.0);
+                                if self.watching {
+                                    if ui
+                                        .add_sized(
+                                            [ui.available_width(), 34.0],
+                                            egui::Button::new(
+                                                RichText::new("⏸️ Parar Vigilância")
+                                                    .color(Color32::from_rgb(254, 202, 202))
+                                                    .strong(),
+                                            )
+                                            .fill(Color32::from_rgb(88, 28, 28))
+                                            .corner_radius(7.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        let _ = self.ui_tx.send(UiCmd::StopWatch);
+                                    }
+                                } else if ui
+                                    .add_sized(
+                                        [ui.available_width(), 34.0],
+                                        egui::Button::new(
+                                            RichText::new("🛡️ Vigiar Automaticamente")
+                                                .color(TEXT)
+                                                .strong(),
+                                        )
+                                        .fill(BG_ROW)
+                                        .stroke(Stroke::new(1.0, STROKE))
+                                        .corner_radius(7.0),
+                                    )
+                                    .clicked()
+                                {
+                                    let _ = self.ui_tx.send(UiCmd::StartWatch {
+                                        interval: self.watch_interval,
+                                        trim_game: self.trim_game_memory,
+                                    });
+                                }
+                            });
+
+                        ui.add_space(10.0);
+                        section_label(ui, "AJUSTES");
+                        egui::Frame::new()
+                            .fill(BG_RAISED)
+                            .stroke(Stroke::new(1.0, STROKE))
+                            .corner_radius(10.0)
+                            .inner_margin(10.0)
+                            .show(ui, |ui| {
+                                if ui
+                                    .checkbox(
+                                        &mut self.autostart,
+                                        RichText::new("Iniciar com o Windows")
+                                            .color(TEXT)
+                                            .size(13.0),
+                                    )
+                                    .changed()
+                                {
+                                    match autostart::set_enabled(self.autostart) {
+                                        Ok(()) => self.push_log(if self.autostart {
+                                            "Inicialização automática ativada."
+                                        } else {
+                                            "Inicialização automática desativada."
+                                        }),
+                                        Err(err) => self.push_log(format!("Auto-start: {err}")),
+                                    }
+                                }
+
+                                ui.add_space(4.0);
+                                if ui
+                                    .checkbox(
+                                        &mut self.trim_game_memory,
+                                        RichText::new("Trim de memória nos Jogos").color(TEXT).size(13.0),
+                                    )
+                                    .changed()
+                                {
+                                    self.push_log(if self.trim_game_memory {
+                                        "Trim de memória ativado EXCLUSIVAMENTE para jogos."
+                                    } else {
+                                        "Trim de memória de jogos desativado."
+                                    });
+                                }
+                                ui.label(
+                                    RichText::new("Focado apenas nos jogos ativos. Apps em 2º plano nunca sofrem trim.")
+                                        .color(MUTED)
+                                        .size(11.0),
+                                );
+
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new("Intervalo de vigilância (s)")
+                                        .color(MUTED)
+                                        .size(12.0),
+                                );
+                                ui.add(
+                                    egui::Slider::new(&mut self.watch_interval, 15..=120)
+                                        .clamping(egui::SliderClamping::Always),
+                                );
+
+                                ui.add_space(10.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("📄 Config:").color(MUTED).size(11.0));
+                                    ui.label(
+                                        RichText::new(self.config_path.display().to_string())
+                                            .color(ACCENT)
+                                            .size(11.0)
+                                            .monospace(),
+                                    );
+                                });
+                            });
+                    });
+            });
+        });
     }
 
     fn draw_games(&self, ui: &mut egui::Ui) {
         let Some(report) = &self.report else {
-            ui.label(
-                RichText::new("Procurando jogos abertos…")
-                    .color(MUTED)
-                    .size(14.0),
-            );
+            ui.label(RichText::new("Carregando processos…").color(MUTED));
             return;
         };
 
         if report.games.is_empty() {
-            ui.add_space(12.0);
-            ui.label(
-                RichText::new("Nenhum jogo aberto agora")
-                    .color(TEXT)
-                    .size(16.0)
-                    .strong(),
-            );
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(
-                    "Inicie um jogo e toque em Atualizar lista. O otimizador não fecha nada.",
-                )
-                .color(MUTED)
-                .size(13.0),
-            );
+            ui.vertical_centered(|ui| {
+                ui.add_space(12.0);
+                ui.label(RichText::new("🎮").size(24.0));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Nenhum jogo detectado no momento.")
+                        .color(TEXT)
+                        .strong()
+                        .size(13.0),
+                );
+                ui.label(
+                    RichText::new("Inicie seu jogo normalmente. O túnel VPS e a priorização serão ativados sozinhos.")
+                        .color(MUTED)
+                        .size(12.0),
+                );
+                ui.add_space(12.0);
+            });
         } else {
             for game in &report.games {
                 egui::Frame::new()
                     .fill(BG_ROW)
-                    .corner_radius(10.0)
+                    .stroke(Stroke::new(1.0, STROKE))
+                    .corner_radius(8.0)
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            ui.label(RichText::new("🎮").size(16.0));
                             ui.label(RichText::new(&game.name).color(TEXT).strong().size(15.0));
+
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -1094,43 +770,228 @@ impl GuiApp {
                                 },
                             );
                         });
+
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("PID {}", game.pid))
+                                    .color(MUTED)
+                                    .size(11.0)
+                                    .monospace(),
+                            );
+                            if let Some(status) = &self.tunnel_status {
+                                if status.active {
+                                    ui.label(
+                                        RichText::new("• 🟢 Tunelado via VPS (10.8.0.2)")
+                                            .color(OK)
+                                            .size(11.0)
+                                            .strong(),
+                                    );
+                                }
+                            }
+                        });
+
+                        // Show actively routed destinations if available
+                        if let Some(status) = &self.tunnel_status {
+                            if status.active && !status.routed_destinations.is_empty() {
+                                ui.add_space(4.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new("📡 Servidores roteados:").color(MUTED).size(11.0));
+                                    for dest in status.routed_destinations.iter().take(3) {
+                                        ui.label(
+                                            RichText::new(dest.to_string())
+                                                .color(TUNNEL_COLOR)
+                                                .size(11.0)
+                                                .monospace(),
+                                        );
+                                    }
+                                });
+                            }
+                        }
                     });
                 ui.add_space(6.0);
             }
         }
+    }
 
-        if !report.reclaim_candidates.is_empty() {
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(format!(
-                    "Pode ceder RAM · {} navegador(es)",
-                    report.reclaim_candidates.len()
-                ))
-                .color(MUTED)
-                .size(12.5),
-            );
-            for proc in report.reclaim_candidates.iter().take(4) {
+    fn draw_tunnel_modal(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_tunnel_modal;
+        egui::Window::new("🛡️ Configuração do Túnel WireGuard (VPS)")
+            .open(&mut open)
+            .default_width(540.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Isolamento por PID: Apenas as conexões do jogo passam pela VPS. Chrome, Discord e o resto do PC continuam na sua internet normal.",
+                    )
+                    .color(MUTED)
+                    .size(12.0),
+                );
+                ui.add_space(8.0);
+
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&proc.name).color(MUTED).size(12.5));
+                    ui.checkbox(
+                        &mut self.wireguard_cfg.enabled,
+                        RichText::new("Ativar Tunelamento para Jogos Detectados")
+                            .strong()
+                            .color(TEXT),
+                    );
+                    if let Some(status) = &self.tunnel_status {
+                        if let Some(ms) = status.vps_ping_ms {
+                            ui.label(
+                                RichText::new(format!("🟢 Latência VPS: {ms}ms"))
+                                    .color(OK)
+                                    .strong(),
+                            );
+                        }
+                    }
+                });
+
+                ui.add_space(8.0);
+                egui::Grid::new("wg_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Endpoint VPS (IP:Porta):");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.wireguard_cfg.endpoint)
+                                .hint_text("ex: 198.51.100.1:51820")
+                                .desired_width(320.0),
+                        );
+                        ui.end_row();
+
+                        ui.label("Chave Privada (Cliente):");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.wireguard_cfg.private_key)
+                                .password(true)
+                                .hint_text("Chave privada base64")
+                                .desired_width(320.0),
+                        );
+                        ui.end_row();
+
+                        ui.label("Chave Pública (VPS):");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.wireguard_cfg.peer_public_key)
+                                .hint_text("Chave pública base64 da VPS")
+                                .desired_width(320.0),
+                        );
+                        ui.end_row();
+
+                        ui.label("IP do Cliente no Túnel:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.wireguard_cfg.tunnel_ip)
+                                .hint_text("10.0.0.2")
+                                .desired_width(320.0),
+                        );
+                        ui.end_row();
+
+                        ui.label("Gateway da VPN (VPS):");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.wireguard_cfg.tunnel_gateway)
+                                .hint_text("10.0.0.1")
+                                .desired_width(320.0),
+                        );
+                        ui.end_row();
+
+                        ui.label("DNS Opcional:");
+                        let mut dns_str = self.wireguard_cfg.dns.clone().unwrap_or_default();
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut dns_str)
+                                    .hint_text("1.1.1.1")
+                                    .desired_width(320.0),
+                            )
+                            .changed()
+                        {
+                            self.wireguard_cfg.dns = if dns_str.trim().is_empty() {
+                                None
+                            } else {
+                                Some(dns_str)
+                            };
+                        }
+                        ui.end_row();
+                    });
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("📡 Testar Ping VPS").color(TEXT))
+                                .fill(BG_ROW)
+                                .corner_radius(6.0),
+                        )
+                        .clicked()
+                    {
+                        let _ = self.ui_tx.send(UiCmd::TestVpsPing);
+                    }
+
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("💾 Salvar em games.toml")
+                                    .strong()
+                                    .color(Color32::from_rgb(28, 22, 12)),
+                            )
+                            .fill(ACCENT)
+                            .corner_radius(6.0),
+                        )
+                        .clicked()
+                    {
+                        let _ = self.ui_tx.send(UiCmd::UpdateWireGuard(self.wireguard_cfg.clone()));
+                        self.push_log("Configurações do WireGuard enviadas.");
+                    }
+                });
+
+                if let Some(status) = &self.tunnel_status {
+                    if !status.routed_destinations.is_empty() {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "Rotas de servidores ativas no momento ({}):",
+                                status.routed_destinations.len()
+                            ))
+                            .color(OK)
+                            .size(12.0)
+                            .strong(),
+                        );
+                        for dest in &status.routed_destinations {
+                            ui.label(
+                                RichText::new(format!("  • {dest} -> VPS Gateway"))
+                                    .color(TEXT)
+                                    .monospace()
+                                    .size(11.0),
+                            );
+                        }
+                    }
+                }
+
+                ui.add_space(10.0);
+                ui.collapsing("ℹ️ Comandos necessários na VPS Linux", |ui| {
                     ui.label(
-                        RichText::new(format_mib(proc.memory_bytes))
-                            .color(MUTED)
-                            .size(12.5),
+                        RichText::new(
+                            "Para que a VPS encaminhe os pacotes dos jogos para os servidores de jogo, garanta na VPS:\n\
+                            1. sysctl -w net.ipv4.ip_forward=1\n\
+                            2. iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE\n\
+                            (Substitua eth0 pelo nome da interface pública da sua VPS se for diferente).",
+                        )
+                        .color(MUTED)
+                        .size(11.0),
                     );
                 });
-            }
-        }
+            });
+        self.show_tunnel_modal = open;
     }
 }
 
 fn section_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).color(MUTED).size(12.0).strong());
-    ui.add_space(6.0);
+    ui.label(RichText::new(text).color(MUTED).size(11.0).strong());
+    ui.add_space(4.0);
 }
 
 fn status_chip(ui: &mut egui::Ui, watching: bool) {
     let (label, color) = if watching {
-        ("Cuidando", OK)
+        ("Vigiando", OK)
     } else {
         ("Em espera", MUTED)
     };
@@ -1143,12 +1004,12 @@ fn status_chip(ui: &mut egui::Ui, watching: bool) {
         ))
         .stroke(Stroke::new(1.0, color.gamma_multiply(0.45)))
         .corner_radius(16.0)
-        .inner_margin(egui::Margin::symmetric(12, 6))
+        .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let dot = ui.allocate_response(Vec2::splat(8.0), Sense::hover());
                 ui.painter().circle_filled(dot.rect.center(), 3.5, color);
-                ui.label(RichText::new(label).color(color).size(12.5).strong());
+                ui.label(RichText::new(label).color(color).size(12.0).strong());
             });
         });
 }
@@ -1157,57 +1018,14 @@ fn metric_pill(ui: &mut egui::Ui, label: &str, value: &str, accent: Color32) {
     egui::Frame::new()
         .fill(BG_RAISED)
         .stroke(Stroke::new(1.0, STROKE))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(12, 8))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(label).color(MUTED).size(12.0));
-                ui.label(RichText::new(value).color(accent).strong().size(14.0));
+                ui.label(RichText::new(label).color(MUTED).size(11.0));
+                ui.label(RichText::new(value).color(accent).strong().size(13.0));
             });
         });
-}
-
-fn spawn_tray_pump(
-    ctx: egui::Context,
-    signals: Arc<TraySignals>,
-    show_id: MenuId,
-    optimize_id: MenuId,
-    quit_id: MenuId,
-) {
-    thread::spawn(move || loop {
-        let mut woke = false;
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            woke = true;
-            if event.id == show_id {
-                signals.show.store(true, Ordering::SeqCst);
-            } else if event.id == optimize_id {
-                signals.optimize.store(true, Ordering::SeqCst);
-            } else if event.id == quit_id {
-                signals.quit.store(true, Ordering::SeqCst);
-            }
-        }
-        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            match event {
-                TrayIconEvent::DoubleClick {
-                    button: MouseButton::Left,
-                    ..
-                }
-                | TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => {
-                    woke = true;
-                    signals.show.store(true, Ordering::SeqCst);
-                }
-                _ => {}
-            }
-        }
-        if woke {
-            ctx.request_repaint();
-        }
-        thread::sleep(Duration::from_millis(80));
-    });
 }
 
 fn spawn_worker(
@@ -1215,52 +1033,77 @@ fn spawn_worker(
     ui_rx: Receiver<UiCmd>,
     worker_tx: Sender<WorkerMsg>,
     watch_flag: Arc<AtomicBool>,
+    ctx: egui::Context,
 ) {
     thread::spawn(move || {
         let mut interval = 45u64;
         let mut trim_game = false;
-        let mut last_watch = Instant::now() - Duration::from_secs(10_000);
+        let initial_cfg = AppConfig::load_or_default(&config_path).unwrap_or_default();
+        let mut tunnel_mgr = crate::tunnel::TunnelManager::new(initial_cfg.wireguard);
+
+        let mut last_scan = Instant::now();
+        let mut last_optimize = Instant::now();
+        let mut prev_game_count = 0usize;
+
+        let sync_tunnel = |mgr: &mut crate::tunnel::TunnelManager,
+                           report: &OptimizeReport,
+                           tx: &Sender<WorkerMsg>| {
+            let pids: Vec<u32> = report.games.iter().map(|g| g.pid).collect();
+            let pass = mgr.process_game_pids(&pids);
+            for conn in &pass.newly_routed {
+                let _ = tx.send(WorkerMsg::Log(format!(
+                    "[Túnel VPS] Roteando {} ({}:{}) via VPS",
+                    conn.protocol, conn.remote_ip, conn.remote_port
+                )));
+            }
+            if !pass.removed_routes.is_empty() {
+                let _ = tx.send(WorkerMsg::Log(format!(
+                    "[Túnel VPS] {} rota(s) removida(s) de jogo finalizado",
+                    pass.removed_routes.len()
+                )));
+            }
+            let _ = tx.send(WorkerMsg::Tunnel(mgr.status()));
+        };
+
         loop {
+            // Heartbeat: wake up egui event loop so tray events & worker msgs are processed while hidden
+            ctx.request_repaint();
+
             match ui_rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(UiCmd::Scan) => {
-                    let _ = worker_tx.send(WorkerMsg::Busy(true));
                     let config = AppConfig::load_or_default(&config_path).unwrap_or_default();
                     let report = optimize_system(&OptimizeRequest {
                         config,
                         dry_run: true,
                     });
-                    let status = if report.games.is_empty() {
-                        "Nenhum jogo aberto agora.".into()
-                    } else {
-                        format!("{} jogo(s) pronto(s) para otimizar.", report.games.len())
-                    };
-                    let _ = worker_tx.send(WorkerMsg::Status(status));
+                    prev_game_count = report.games.len();
+                    let _ = worker_tx.send(WorkerMsg::Log(format!(
+                        "Scan: {} jogo(s) monitorado(s).",
+                        report.games.len()
+                    )));
+                    sync_tunnel(&mut tunnel_mgr, &report, &worker_tx);
                     let _ = worker_tx.send(WorkerMsg::Report(report));
-                    let _ = worker_tx.send(WorkerMsg::Busy(false));
+                    last_scan = Instant::now();
                 }
                 Ok(UiCmd::Optimize { trim_game: tg }) => {
                     trim_game = tg;
-                    let _ = worker_tx.send(WorkerMsg::Busy(true));
                     let mut config = AppConfig::load_or_default(&config_path).unwrap_or_default();
                     config.trim_game_memory = trim_game;
                     let report = optimize_system(&OptimizeRequest {
                         config,
                         dry_run: false,
                     });
+                    prev_game_count = report.games.len();
                     let ok = report.results.iter().filter(|r| r.ok).count();
                     let fail = report.results.iter().filter(|r| !r.ok).count();
-                    let status = if report.games.is_empty() {
-                        "Nenhum jogo aberto para otimizar.".into()
-                    } else if fail == 0 {
-                        format!("Tudo certo — {} jogo(s) otimizado(s).", report.games.len())
-                    } else {
-                        format!(
-                            "Otimizou com avisos ({ok} ok, {fail} falha). Tente como administrador."
-                        )
-                    };
-                    let _ = worker_tx.send(WorkerMsg::Status(status));
+                    let _ = worker_tx.send(WorkerMsg::Log(format!(
+                        "Otimização: {ok} ok, {fail} falha(s), {} jogo(s).",
+                        report.games.len()
+                    )));
+                    sync_tunnel(&mut tunnel_mgr, &report, &worker_tx);
                     let _ = worker_tx.send(WorkerMsg::Report(report));
-                    let _ = worker_tx.send(WorkerMsg::Busy(false));
+                    last_optimize = Instant::now();
+                    last_scan = Instant::now();
                 }
                 Ok(UiCmd::StartWatch {
                     interval: secs,
@@ -1269,43 +1112,82 @@ fn spawn_worker(
                     interval = secs.max(15);
                     trim_game = tg;
                     watch_flag.store(true, Ordering::SeqCst);
-                    last_watch = Instant::now() - Duration::from_secs(10_000);
                     let _ = worker_tx.send(WorkerMsg::Watching(true));
+                    let _ =
+                        worker_tx.send(WorkerMsg::Log(format!("Vigilância a cada {interval}s.")));
+                    last_optimize = Instant::now();
                 }
                 Ok(UiCmd::StopWatch) => {
                     watch_flag.store(false, Ordering::SeqCst);
                     let _ = worker_tx.send(WorkerMsg::Watching(false));
+                    let _ = worker_tx.send(WorkerMsg::Log("Vigilância parada.".into()));
                 }
-                Ok(UiCmd::CleanCache) => {
-                    let _ = worker_tx.send(WorkerMsg::Busy(true));
-                    let report = cache::clean_user_caches();
-                    let _ = worker_tx.send(WorkerMsg::Cache(report));
-                    let _ = worker_tx.send(WorkerMsg::Busy(false));
+                Ok(UiCmd::UpdateWireGuard(new_cfg)) => {
+                    let mut config = AppConfig::load_or_default(&config_path).unwrap_or_default();
+                    config.wireguard = new_cfg.clone();
+                    if let Err(err) = config.save_to_path(&config_path) {
+                        let _ = worker_tx
+                            .send(WorkerMsg::Log(format!("Erro ao salvar games.toml: {err}")));
+                    } else {
+                        let _ = worker_tx.send(WorkerMsg::Log(
+                            "Configurações do WireGuard salvas em games.toml.".into(),
+                        ));
+                    }
+                    tunnel_mgr.update_config(new_cfg);
+                    let _ = worker_tx.send(WorkerMsg::Tunnel(tunnel_mgr.status()));
                 }
-                Ok(UiCmd::CheckUpdate) => {
-                    let result = update::check_latest().map_err(|err| err.to_string());
-                    let _ = worker_tx.send(WorkerMsg::Update(result));
-                }
-                Ok(UiCmd::InstallUpdate { url }) => {
-                    let result = update::download_setup(&url).map_err(|err| err.to_string());
-                    let _ = worker_tx.send(WorkerMsg::UpdateDownload(result));
+                Ok(UiCmd::TestVpsPing) => {
+                    let _ = worker_tx.send(WorkerMsg::Log(
+                        "Testando ping para o endpoint da VPS...".into(),
+                    ));
+                    match tunnel_mgr.test_vps_ping() {
+                        Ok(ms) => {
+                            let _ = worker_tx.send(WorkerMsg::Log(format!("Ping VPS: {ms}ms.")));
+                        }
+                        Err(err) => {
+                            let _ =
+                                worker_tx.send(WorkerMsg::Log(format!("Falha no ping VPS: {err}")));
+                        }
+                    }
+                    let _ = worker_tx.send(WorkerMsg::Tunnel(tunnel_mgr.status()));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if watch_flag.load(Ordering::SeqCst)
-                        && last_watch.elapsed() >= Duration::from_secs(interval.max(15))
-                    {
-                        last_watch = Instant::now();
+                    // Continuous automatic monitoring for running games & tunnel sync every 2 seconds
+                    if last_scan.elapsed() >= Duration::from_secs(2) {
+                        last_scan = Instant::now();
                         let mut config =
                             AppConfig::load_or_default(&config_path).unwrap_or_default();
+
+                        let is_watch_active = watch_flag.load(Ordering::SeqCst);
+                        let should_optimize = is_watch_active
+                            && last_optimize.elapsed() >= Duration::from_secs(interval.max(15));
+
                         config.trim_game_memory = trim_game;
                         let report = optimize_system(&OptimizeRequest {
                             config,
-                            dry_run: false,
+                            dry_run: !should_optimize,
                         });
-                        let _ = worker_tx.send(WorkerMsg::Report(report));
+
+                        if should_optimize {
+                            last_optimize = Instant::now();
+                            let ok = report.results.iter().filter(|r| r.ok).count();
+                            let _ = worker_tx.send(WorkerMsg::Log(format!(
+                                "Vigilância periódica: {ok} ações aplicadas."
+                            )));
+                        }
+
+                        // Sync tunnel if games are currently active, or if games were running and closed
+                        if !report.games.is_empty() || prev_game_count > 0 {
+                            sync_tunnel(&mut tunnel_mgr, &report, &worker_tx);
+                            let _ = worker_tx.send(WorkerMsg::Report(report.clone()));
+                        }
+                        prev_game_count = report.games.len();
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    tunnel_mgr.shutdown();
+                    break;
+                }
             }
         }
     });

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::tunnel::WireGuardConfig;
+
 /// Runtime settings and game name allowlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
@@ -35,6 +37,8 @@ pub struct AppConfig {
     pub memory_trim_threshold_bytes: u64,
     /// Cap on how many non-game processes are trimmed per pass.
     pub max_trim_candidates: usize,
+    /// Embedded WireGuard VPS tunneling configuration.
+    pub wireguard: WireGuardConfig,
     /// Optional path the config was loaded from.
     pub source_path: Option<PathBuf>,
 }
@@ -52,9 +56,10 @@ impl Default for AppConfig {
             prefer_performance_cores: true,
             residency_floor_percent: 60,
             trim_game_memory: false,
-            trim_non_game_memory: true,
+            trim_non_game_memory: false,
             memory_trim_threshold_bytes: 200 * 1024 * 1024,
             max_trim_candidates: 12,
+            wireguard: WireGuardConfig::default(),
             source_path: None,
         }
     }
@@ -64,12 +69,66 @@ impl AppConfig {
     /// Load `games.toml` if present; otherwise return defaults.
     pub fn load_or_default(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref();
-        if !path.exists() {
-            return Ok(Self::default());
+        let local_sibling = path.with_file_name("games.local.toml");
+        let target_path = if local_sibling.exists() {
+            Some(local_sibling)
+        } else if path.exists() {
+            Some(path.to_path_buf())
+        } else if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(parent) = exe_path.parent() {
+                let local_in_exe = parent.join("games.local.toml");
+                if local_in_exe.exists() {
+                    Some(local_in_exe)
+                } else {
+                    let candidate = parent.join(path);
+                    if candidate.exists() {
+                        Some(candidate)
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(p) = target_path {
+            let raw = fs::read_to_string(&p)?;
+            let file: ConfigFile = toml::from_str(&raw)?;
+            return Ok(Self::from_file(file, Some(p)));
         }
-        let raw = fs::read_to_string(path)?;
-        let file: ConfigFile = toml::from_str(&raw)?;
-        Ok(Self::from_file(file, Some(path.to_path_buf())))
+
+        Ok(Self::default())
+    }
+
+    /// Save current configuration back to a TOML file.
+    pub fn save_to_path(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        let file = ConfigFile {
+            games: GamesSection {
+                names: self.game_names.iter().cloned().collect(),
+            },
+            settings: SettingsSection {
+                boost_priority: Some(self.boost_priority),
+                disable_power_throttling: Some(self.disable_power_throttling),
+                raise_memory_priority: Some(self.raise_memory_priority),
+                enable_priority_boost: Some(self.enable_priority_boost),
+                prefer_performance_cores: Some(self.prefer_performance_cores),
+                residency_floor_percent: Some(self.residency_floor_percent),
+                trim_game_memory: Some(self.trim_game_memory),
+                trim_non_game_memory: Some(self.trim_non_game_memory),
+                memory_trim_threshold_mb: Some(self.memory_trim_threshold_bytes / (1024 * 1024)),
+                max_trim_candidates: Some(self.max_trim_candidates),
+                never_trim_names: Some(self.never_trim_names.iter().cloned().collect()),
+                reclaim_names: Some(self.reclaim_names.iter().cloned().collect()),
+            },
+            wireguard: Some(self.wireguard.clone()),
+        };
+        let raw = toml::to_string_pretty(&file)?;
+        fs::write(path, raw)?;
+        Ok(())
     }
 
     fn from_file(file: ConfigFile, source_path: Option<PathBuf>) -> Self {
@@ -97,9 +156,10 @@ impl AppConfig {
             prefer_performance_cores: file.settings.prefer_performance_cores.unwrap_or(true),
             residency_floor_percent: file.settings.residency_floor_percent.unwrap_or(60).min(90),
             trim_game_memory: file.settings.trim_game_memory.unwrap_or(false),
-            trim_non_game_memory: file.settings.trim_non_game_memory.unwrap_or(true),
+            trim_non_game_memory: file.settings.trim_non_game_memory.unwrap_or(false),
             memory_trim_threshold_bytes: threshold_mb.saturating_mul(1024 * 1024),
             max_trim_candidates: file.settings.max_trim_candidates.unwrap_or(12),
+            wireguard: file.wireguard.unwrap_or_default(),
             source_path,
         }
     }
@@ -231,6 +291,9 @@ pub struct ConfigFile {
     /// Optimizer toggles.
     #[serde(default)]
     pub settings: SettingsSection,
+    /// WireGuard embedded tunnel section.
+    #[serde(default)]
+    pub wireguard: Option<WireGuardConfig>,
 }
 
 /// `[games]` table.
@@ -316,6 +379,7 @@ mod tests {
                 names: vec!["MyGame.EXE".into()],
             },
             settings: SettingsSection::default(),
+            wireguard: None,
         };
         let cfg = AppConfig::from_file(file, None);
         assert!(cfg.game_names.contains("mygame"));
@@ -334,6 +398,7 @@ mod tests {
                 reclaim_names: Some(vec!["MyBrowser.EXE".into()]),
                 ..SettingsSection::default()
             },
+            wireguard: None,
         };
         let cfg = AppConfig::from_file(file, None);
         assert!(cfg.reclaim_names.contains("mybrowser"));
@@ -349,5 +414,18 @@ mod tests {
         assert!(reclaim.contains("firefox"));
         assert!(!reclaim.contains("ffmpeg"));
         assert!(!reclaim.contains("obs64"));
+    }
+
+    #[test]
+    fn config_includes_wireguard() {
+        let mut file = ConfigFile::default();
+        let mut wg = WireGuardConfig::default();
+        wg.enabled = true;
+        wg.endpoint = "1.2.3.4:51820".into();
+        file.wireguard = Some(wg);
+
+        let cfg = AppConfig::from_file(file, None);
+        assert!(cfg.wireguard.enabled);
+        assert_eq!(cfg.wireguard.endpoint, "1.2.3.4:51820");
     }
 }
