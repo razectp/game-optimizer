@@ -21,7 +21,7 @@ use crate::config::AppConfig;
 use crate::detect::RunningProcessInfo;
 use crate::optimize::{optimize_system, OptimizeReport, OptimizeRequest};
 use crate::report::format_mib;
-use crate::tunnel::{TunnelStatus, WireGuardConfig};
+use crate::tunnel::{TunnelHealth, TunnelStatus, WireGuardConfig};
 
 /// Warm amber — primary actions / brand energy.
 const ACCENT: Color32 = Color32::from_rgb(245, 158, 11);
@@ -663,9 +663,18 @@ impl GuiApp {
             );
 
             let (tunnel_label, tunnel_col) = match &self.tunnel_status {
-                Some(s) if s.active => (format!("Ativo ({} rota(s))", s.active_routes_count), OK),
-                Some(s) if s.vps_ping_ms.is_some() => {
-                    (format!("Conectado ({}ms)", s.vps_ping_ms.unwrap()), TUNNEL_COLOR)
+                Some(s) if s.health == TunnelHealth::Healthy => {
+                    if let Some(ms) = s.vps_ping_ms {
+                        (format!("Ativo ({ms}ms)"), OK)
+                    } else {
+                        (format!("Ativo ({} rota(s))", s.active_routes_count), OK)
+                    }
+                }
+                Some(s) if s.health == TunnelHealth::Connecting => {
+                    ("Conectando…".into(), ACCENT)
+                }
+                Some(s) if s.health == TunnelHealth::Degraded => {
+                    ("⚠️ Falha VPS (Fallback Direto)".into(), WARN)
                 }
                 _ if self.wireguard_cfg.enabled => ("Pronto".into(), ACCENT),
                 _ => ("Desativado".into(), MUTED),
@@ -1009,13 +1018,32 @@ impl GuiApp {
                                     .monospace(),
                             );
                             if let Some(status) = &self.tunnel_status {
-                                if status.active {
-                                    ui.label(
-                                        RichText::new("• 🟢 Tunelado via VPS (10.8.0.2)")
-                                            .color(OK)
-                                            .size(11.0)
-                                            .strong(),
-                                    );
+                                match status.health {
+                                    TunnelHealth::Healthy => {
+                                        ui.label(
+                                            RichText::new("• 🟢 Tunelado via VPS")
+                                                .color(OK)
+                                                .size(11.0)
+                                                .strong(),
+                                        );
+                                    }
+                                    TunnelHealth::Connecting => {
+                                        ui.label(
+                                            RichText::new("• 🟡 Conectando VPS (Handshake...)")
+                                                .color(ACCENT)
+                                                .size(11.0)
+                                                .strong(),
+                                        );
+                                    }
+                                    TunnelHealth::Degraded => {
+                                        ui.label(
+                                            RichText::new("• 🛡️ Fallback direto ativo (evitando queda)")
+                                                .color(WARN)
+                                                .size(11.0)
+                                                .strong(),
+                                        );
+                                    }
+                                    TunnelHealth::Idle => {}
                                 }
                             }
                         });
@@ -1067,15 +1095,58 @@ impl GuiApp {
                             .color(TEXT),
                     );
                     if let Some(status) = &self.tunnel_status {
-                        if let Some(ms) = status.vps_ping_ms {
-                            ui.label(
-                                RichText::new(format!("🟢 Latência VPS: {ms}ms"))
-                                    .color(OK)
-                                    .strong(),
-                            );
+                        match status.health {
+                            TunnelHealth::Healthy => {
+                                if let Some(ms) = status.vps_ping_ms {
+                                    ui.label(
+                                        RichText::new(format!("🟢 Latência VPS: {ms}ms"))
+                                            .color(OK)
+                                            .strong(),
+                                    );
+                                } else {
+                                    ui.label(
+                                        RichText::new("🟢 Conectado e Saudável")
+                                            .color(OK)
+                                            .strong(),
+                                    );
+                                }
+                            }
+                            TunnelHealth::Connecting => {
+                                ui.label(
+                                    RichText::new("🟡 Aguardando Handshake...")
+                                        .color(ACCENT)
+                                        .strong(),
+                                );
+                            }
+                            TunnelHealth::Degraded => {
+                                ui.label(
+                                    RichText::new("⚠️ Falha VPS - Fallback Ativo")
+                                        .color(WARN)
+                                        .strong(),
+                                );
+                            }
+                            TunnelHealth::Idle => {}
                         }
                     }
                 });
+
+                if let Some(status) = &self.tunnel_status {
+                    if status.health == TunnelHealth::Degraded && self.wireguard_cfg.enabled {
+                        ui.add_space(6.0);
+                        egui::Frame::new()
+                            .fill(Color32::from_rgb(38, 22, 18))
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(180, 80, 60)))
+                            .corner_radius(6.0)
+                            .inner_margin(8.0)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new("🛡️ Proteção Ativa contra Quedas: A VPS não respondeu ou a conexão falhou. As rotas dos jogos foram desviadas automaticamente para a sua internet local. Seu jogo continua funcionando diretamente sem cair! Assim que a VPS voltar a responder, o tunelamento otimizado será reativado.")
+                                        .color(Color32::from_rgb(255, 200, 180))
+                                        .size(11.0),
+                                );
+                            });
+                    }
+                }
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -1894,13 +1965,23 @@ fn spawn_worker(
                            tx: &Sender<WorkerMsg>| {
             let pids: Vec<u32> = report.games.iter().map(|g| g.pid).collect();
             let pass = mgr.process_game_pids(&pids);
+            if pass.fallback_bypassed {
+                let _ = tx.send(WorkerMsg::Log(
+                    "⚠️ [Túnel VPS] Falha na conexão com a VPS detectada! Fallback automático ativado (tráfego direto via operadora para evitar queda do jogo)".to_string(),
+                ));
+            }
+            if pass.recovered {
+                let _ = tx.send(WorkerMsg::Log(
+                    "🟢 [Túnel VPS] Conexão com a VPS restabelecida com sucesso! Reativando tunelamento otimizado".to_string(),
+                ));
+            }
             for conn in &pass.newly_routed {
                 let _ = tx.send(WorkerMsg::Log(format!(
                     "[Túnel VPS] Roteando {} ({}:{}) via VPS",
                     conn.protocol, conn.remote_ip, conn.remote_port
                 )));
             }
-            if !pass.removed_routes.is_empty() {
+            if !pass.removed_routes.is_empty() && !pass.fallback_bypassed {
                 let _ = tx.send(WorkerMsg::Log(format!(
                     "[Túnel VPS] {} rota(s) removida(s) de jogo finalizado",
                     pass.removed_routes.len()

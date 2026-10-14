@@ -9,10 +9,10 @@ use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use boringtun::noise::{Tunn, TunnResult};
@@ -25,12 +25,16 @@ pub struct EmbeddedTunnelHandle {
     threads: Vec<JoinHandle<()>>,
     /// Windows interface index for GameOptimizerTun.
     pub if_index: u32,
+    handshake_confirmed: Arc<AtomicBool>,
+    last_rx_secs: Arc<AtomicU64>,
+    started_at: Instant,
 }
 
 impl std::fmt::Debug for EmbeddedTunnelHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EmbeddedTunnelHandle")
             .field("running", &!self.stop_flag.load(Ordering::Relaxed))
+            .field("connected", &self.is_connected())
             .finish()
     }
 }
@@ -48,6 +52,48 @@ impl EmbeddedTunnelHandle {
         let threads = std::mem::take(&mut self.threads);
         for t in threads {
             let _ = t.join();
+        }
+    }
+
+    /// Whether a WireGuard handshake was successfully completed at least once.
+    pub fn has_handshake(&self) -> bool {
+        self.handshake_confirmed.load(Ordering::SeqCst)
+    }
+
+    /// Whether the tunnel is currently receiving packets from the VPS peer.
+    pub fn is_connected(&self) -> bool {
+        if !self.handshake_confirmed.load(Ordering::SeqCst) {
+            return false;
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last = self.last_rx_secs.load(Ordering::SeqCst);
+        if last == 0 {
+            return false;
+        }
+        // If no packet received in the last 8 seconds, consider connection degraded
+        now.saturating_sub(last) <= 8
+    }
+
+    /// Whether the tunnel was recently initiated and is waiting for initial handshake.
+    pub fn is_initial_connecting(&self) -> bool {
+        !self.handshake_confirmed.load(Ordering::SeqCst)
+            && self.started_at.elapsed() < Duration::from_secs(4)
+    }
+
+    /// Seconds since the last packet was received from the VPS peer.
+    pub fn seconds_since_last_rx(&self) -> u64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last = self.last_rx_secs.load(Ordering::SeqCst);
+        if last == 0 {
+            u64::MAX
+        } else {
+            now.saturating_sub(last)
         }
     }
 }
@@ -158,17 +204,25 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
         .set_read_timeout(Some(Duration::from_millis(100)))
         .map_err(|e| format!("Falha ao configurar timeout do socket: {e}"))?;
 
-    // Create BoringTun Tunn instance
+    // Create BoringTun Tunn instance with gaming-optimized keepalive (3s heartbeat)
+    let keepalive_val = if config.keepalive == 0 {
+        3
+    } else {
+        config.keepalive.clamp(2, 4)
+    };
     let tunn = Arc::new(std::sync::Mutex::new(Tunn::new(
         static_private,
         peer_public,
         None,
-        Some(config.keepalive),
+        Some(keepalive_val),
         0,
         None,
     )));
 
     let stop_flag = Arc::new(AtomicBool::new(false));
+    let handshake_confirmed = Arc::new(AtomicBool::new(false));
+    let last_rx_secs = Arc::new(AtomicU64::new(0));
+    let started_at = Instant::now();
     let mut threads = Vec::new();
 
     // Trigger initial handshake
@@ -191,6 +245,8 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
         let session = Arc::clone(&session);
         let tunn = Arc::clone(&tunn);
         let stop = Arc::clone(&stop_flag);
+        let hs_confirmed = Arc::clone(&handshake_confirmed);
+        let rx_secs = Arc::clone(&last_rx_secs);
 
         threads.push(thread::spawn(move || {
             let mut udp_buf = vec![0u8; 65535];
@@ -199,14 +255,37 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
             while !stop.load(Ordering::Relaxed) {
                 match socket.recv_from(&mut udp_buf) {
                     Ok((n, src)) => {
-                        let mut t = tunn.lock().unwrap();
+                        let mut t = match tunn.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
                         match t.decapsulate(Some(src.ip()), &udp_buf[..n], &mut ip_buf) {
-                            TunnResult::Done | TunnResult::Err(_) => {}
+                            TunnResult::Done => {
+                                hs_confirmed.store(true, Ordering::SeqCst);
+                                let now = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                rx_secs.store(now, Ordering::SeqCst);
+                            }
+                            TunnResult::Err(_) => {}
                             TunnResult::WriteToNetwork(reply) => {
+                                hs_confirmed.store(true, Ordering::SeqCst);
+                                let now = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                rx_secs.store(now, Ordering::SeqCst);
                                 let _ = socket.send_to(reply, endpoint_addr);
                             }
                             TunnResult::WriteToTunnelV4(ip_pkt, _)
                             | TunnResult::WriteToTunnelV6(ip_pkt, _) => {
+                                hs_confirmed.store(true, Ordering::SeqCst);
+                                let now = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                rx_secs.store(now, Ordering::SeqCst);
                                 if let Ok(mut send_pkt) =
                                     session.allocate_send_packet(ip_pkt.len() as u16)
                                 {
@@ -242,7 +321,10 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
                 match session.receive_blocking() {
                     Ok(packet) => {
                         let bytes = packet.bytes();
-                        let mut t = tunn.lock().unwrap();
+                        let mut t = match tunn.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
                         match t.encapsulate(bytes, &mut udp_out_buf) {
                             TunnResult::WriteToNetwork(enc_bytes) => {
                                 let _ = socket.send_to(enc_bytes, endpoint_addr);
@@ -268,6 +350,8 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
         let socket = Arc::clone(&socket);
         let tunn = Arc::clone(&tunn);
         let stop = Arc::clone(&stop_flag);
+        let hs_confirmed = Arc::clone(&handshake_confirmed);
+        let rx_secs = Arc::clone(&last_rx_secs);
 
         threads.push(thread::spawn(move || {
             let mut out_buf = vec![0u8; 65535];
@@ -276,13 +360,26 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
             while !stop.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(250));
 
-                let mut t = tunn.lock().unwrap();
+                let mut t = match tunn.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
                 if let TunnResult::WriteToNetwork(packet) = t.update_timers(&mut out_buf) {
                     let _ = socket.send_to(packet, endpoint_addr);
                 }
 
-                // If no connection established yet, periodically retry handshake every 5s
-                if last_handshake.elapsed() > Duration::from_secs(5) {
+                // Check whether connection is currently active and receiving packets
+                let is_conn = {
+                    let last = rx_secs.load(Ordering::SeqCst);
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    hs_confirmed.load(Ordering::SeqCst) && last > 0 && now.saturating_sub(last) <= 8
+                };
+
+                // If not connected or degraded, actively retry handshake initiation every 3s
+                if !is_conn && last_handshake.elapsed() > Duration::from_secs(3) {
                     if let TunnResult::WriteToNetwork(packet) =
                         t.format_handshake_initiation(&mut out_buf, false)
                     {
@@ -298,6 +395,9 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
         stop_flag,
         threads,
         if_index,
+        handshake_confirmed,
+        last_rx_secs,
+        started_at,
     })
 }
 

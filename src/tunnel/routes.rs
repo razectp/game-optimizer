@@ -103,14 +103,14 @@ impl RouteManager {
         to_delete
     }
 
-    /// Remove all managed routes (used on shutdown or when tunnel is disabled).
-    pub fn cleanup_all(&mut self) -> usize {
-        let count = self.active_routes.len();
-        for ip in self.active_routes.keys() {
+    /// Remove all managed routes (used on shutdown or when failover bypass is triggered).
+    pub fn cleanup_all(&mut self) -> Vec<Ipv4Addr> {
+        let ips: Vec<Ipv4Addr> = self.active_routes.keys().copied().collect();
+        for ip in &ips {
             let _ = delete_host_route(*ip);
         }
         self.active_routes.clear();
-        count
+        ips
     }
 
     /// List all currently routed game IPs.

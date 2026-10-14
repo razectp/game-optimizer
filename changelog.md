@@ -2,6 +2,13 @@
 
 ## 0.6.1 — 2026-10-14
 
+- **VPN Failure Detection & Automatic Zero-Drop Failover Bypass**:
+  - Implemented continuous, non-blocking health monitoring of the WireGuard tunnel (`TunnelHealth`: `Idle`, `Connecting`, `Healthy`, `Degraded`).
+  - Active keepalive heartbeat (3s) with BoringTun ensures packet dropouts or VPS unreachability are detected within 6–8 seconds.
+  - Automatic Instant Fallback: If connection to the VPS fails or drops, all `/32` host routes are immediately purged from the Windows routing table, allowing game packets to instantly fall back to the default ISP gateway without dropping the game client.
+  - Proactive TCP Connection Reset: Active TCP connections are immediately reset via `SetTcpEntry` (`MIB_TCP_STATE_DELETE_TCB`) upon failover, forcing game clients to instantly reconnect through the direct network rather than hanging or freezing indefinitely.
+  - Seamless Recovery: When the VPS reconnects and completes a WireGuard handshake, optimized routes are automatically re-engaged.
+  - Real-Time GUI Health Badges: Top bar, game cards, and tunnel modal display health status (`🟢 Ativo`, `🟡 Conectando`, `⚠️ Falha VPS (Fallback Direto)`), reassuring the user that their game is actively protected against disconnects.
 - **Zero External Configuration Dependency**: Compiles and runs out of the box with safe
   built-in defaults (`AppConfig::default()`). No external `games.toml` file is required on disk.
 - **Interactive Running Process Picker & Root Process Tree Detection**: Users can select
