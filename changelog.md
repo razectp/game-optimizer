@@ -14,6 +14,10 @@
   - Normalized NAT persistent keepalive to 25s without 2..4s over-clamping, eliminating handshake renegotiation loops.
   - Completely eliminated `reset_tcp_connection` from fallback: routing tables are cleanly cleared without killing existing game TCP sockets.
   - Reassured users in GUI ping diagnostics that ICMP drops by host firewalls are normal and WireGuard UDP operates completely independently.
+- **Silent Background Execution & Total Elimination of Flashing Console Prompts**:
+  - Applied `CREATE_NO_WINDOW` (`0x08000000`) flags to all `reg.exe` calls in autostart duplicate removal and helper processes.
+  - Completely eliminated the burst of black command prompt windows ("um monte de prompt") that briefly flashed on screen when opening the application.
+  - Enforced `CREATE_NO_WINDOW` across all updater `curl.exe` and shell routines.
 
 ## 0.6.1 — 2026-10-14
 

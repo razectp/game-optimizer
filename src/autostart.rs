@@ -132,8 +132,11 @@ mod platform {
     use super::{APP_NAME, LEFTOVER_RUN_NAMES};
     use std::env;
     use std::fs;
+    use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     pub fn remove_duplicate_entries() {
         remove_startup_shortcuts();
@@ -149,6 +152,7 @@ mod platform {
         let key = format!(r"{hive}\Software\Microsoft\Windows\CurrentVersion\Run");
         let _ = Command::new("reg.exe")
             .args(["delete", &key, "/v", name, "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

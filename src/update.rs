@@ -4,6 +4,12 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 const RELEASES_LATEST: &str = "https://api.github.com/repos/razectp/game-optimizer/releases/latest";
 const USER_AGENT: &str = concat!("GameOptimizer/", env!("CARGO_PKG_VERSION"));
 
@@ -43,18 +49,23 @@ fn normalize_tag(tag: &str) -> String {
 }
 
 fn curl_get(url: &str) -> anyhow::Result<String> {
-    let output = Command::new(curl_bin())
-        .args([
-            "-sS",
-            "-L",
-            "--max-time",
-            "20",
-            "-A",
-            USER_AGENT,
-            "-H",
-            "Accept: application/vnd.github+json",
-            url,
-        ])
+    let mut cmd = Command::new(curl_bin());
+    cmd.args([
+        "-sS",
+        "-L",
+        "--max-time",
+        "20",
+        "-A",
+        USER_AGENT,
+        "-H",
+        "Accept: application/vnd.github+json",
+        url,
+    ]);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd
         .output()
         .map_err(|err| anyhow::anyhow!("curl failed to start: {err}"))?;
     if !output.status.success() {
@@ -152,19 +163,24 @@ pub fn check_latest() -> anyhow::Result<Option<UpdateInfo>> {
 /// Download the setup installer to a temp file.
 pub fn download_setup(url: &str) -> anyhow::Result<PathBuf> {
     let path = env::temp_dir().join("GameOptimizer-update-setup.exe");
-    let output = Command::new(curl_bin())
-        .args([
-            "-sS",
-            "-L",
-            "--max-time",
-            "120",
-            "-A",
-            USER_AGENT,
-            "-o",
-            path.to_str()
-                .ok_or_else(|| anyhow::anyhow!("temp path is not UTF-8"))?,
-            url,
-        ])
+    let mut cmd = Command::new(curl_bin());
+    cmd.args([
+        "-sS",
+        "-L",
+        "--max-time",
+        "120",
+        "-A",
+        USER_AGENT,
+        "-o",
+        path.to_str()
+            .ok_or_else(|| anyhow::anyhow!("temp path is not UTF-8"))?,
+        url,
+    ]);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd
         .output()
         .map_err(|err| anyhow::anyhow!("curl failed to start: {err}"))?;
     if !output.status.success() {
@@ -196,6 +212,7 @@ pub fn open_release_page(url: &str) -> anyhow::Result<()> {
     {
         Command::new("cmd")
             .args(["/C", "start", "", url])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|err| anyhow::anyhow!("could not open browser: {err}"))?;
         Ok(())
