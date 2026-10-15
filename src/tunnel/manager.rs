@@ -250,11 +250,12 @@ impl TunnelManager {
                     Ok(newly_added) => {
                         if newly_added {
                             report.newly_routed.push(conn.clone());
-                            // NOTE: We do NOT reset active TCP connections here.
-                            // Resetting in-flight TCP connections disrupts active game logins (e.g. MIR4),
-                            // causing game clients to display "reconnect" errors and freeze loading.
-                            // The host route is active; subsequent packets and all new connections
-                            // will naturally flow through the optimized tunnel route from the start.
+                            // If this was an already-established game TCP connection,
+                            // reset it so the game client immediately reconnects and binds
+                            // to the newly injected tunnel route (ExitLag behavior).
+                            if conn.protocol == "TCP" && crate::tunnel::sockets::is_game_port(conn.remote_port) {
+                                crate::tunnel::sockets::reset_tcp_connection(conn.pid, conn.remote_ip);
+                            }
                         }
                         self.active_connections
                             .entry(conn.pid)

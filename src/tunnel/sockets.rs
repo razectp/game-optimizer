@@ -45,8 +45,9 @@ struct MibUdpRowOwnerPid {
     owning_pid: u32,
 }
 
-/// Reset an active game TCP connection.
-#[allow(dead_code)]
+/// Reset an active game TCP connection to trigger immediate client reconnection
+/// over the newly created tunnel route (ExitLag behavior).
+/// Strictly ignores web/OAuth ports (443, 80, etc.) to prevent login disruptions.
 pub fn reset_tcp_connection(pid: u32, remote_ip: Ipv4Addr) -> bool {
     let mut size: u32 = 0;
     let _ = unsafe {
@@ -89,7 +90,9 @@ pub fn reset_tcp_connection(pid: u32, remote_ip: Ipv4Addr) -> bool {
         }
 
         let r_ip = Ipv4Addr::from(u32::from_be(row.remote_addr));
-        if r_ip == remote_ip {
+        let r_port = u16::from_be((row.remote_port & 0xFFFF) as u16);
+        // Only reset dedicated game server ports. NEVER reset web/OAuth/auth ports (443, 80, etc.)!
+        if r_ip == remote_ip && is_game_port(r_port) {
             // Convert to MIB_TCPROW_LH and set State to 12 (MIB_TCP_STATE_DELETE_TCB)
             let mut close_row = MIB_TCPROW_LH::default();
             close_row.Anonymous.dwState = 12;

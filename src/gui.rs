@@ -2037,7 +2037,8 @@ fn spawn_worker(
         let initial_cfg = AppConfig::load_or_default(&config_path).unwrap_or_default();
         let mut tunnel_mgr = crate::tunnel::TunnelManager::new(initial_cfg.wireguard);
 
-        let mut last_scan = Instant::now();
+        // Start last_scan in the past so already-open games are scanned immediately on app launch
+        let mut last_scan = Instant::now() - Duration::from_secs(10);
         let mut last_optimize = Instant::now();
         let mut prev_game_count = 0usize;
         let mut active_game_pids: Vec<u32> = Vec::new();
