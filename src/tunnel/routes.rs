@@ -37,12 +37,72 @@ impl RouteManager {
         self.if_index = if_index;
     }
 
+    /// Add a subnet route (e.g. /24 cluster) for game servers.
+    pub fn add_subnet_route(
+        &mut self,
+        pid: u32,
+        subnet_ip: Ipv4Addr,
+        mask: Ipv4Addr,
+    ) -> Result<bool, String> {
+        let gateway = match self.gateway {
+            Some(gw) => gw,
+            None => return Err("Gateway do túnel não configurado".into()),
+        };
+
+        if let Some(pids) = self.active_routes.get_mut(&subnet_ip) {
+            if !pids.contains(&pid) {
+                pids.push(pid);
+            }
+            return Ok(false);
+        }
+
+        let mut args = vec![
+            "add".to_string(),
+            subnet_ip.to_string(),
+            "mask".to_string(),
+            mask.to_string(),
+            gateway.to_string(),
+        ];
+        if let Some(idx) = self.if_index {
+            if idx > 0 {
+                args.push("IF".to_string());
+                args.push(idx.to_string());
+            }
+        }
+        args.push("metric".to_string());
+        args.push("1".to_string());
+
+        let output = Command::new("route")
+            .args(&args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("Falha ao executar 'route add subnet': {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!("Erro ao adicionar rota de sub-rede: {stdout} {stderr}"));
+        }
+
+        self.active_routes.insert(subnet_ip, vec![pid]);
+        Ok(true)
+    }
+
     /// Add a host route for a game process destination IP.
+    /// Also automatically adds the /24 cluster subnet route so any new game connections
+    /// in the same server pool (such as world loading on port 31000) pass directly
+    /// through the tunnel from packet #0.
     pub fn add_game_route(&mut self, pid: u32, target_ip: Ipv4Addr) -> Result<bool, String> {
         let gateway = match self.gateway {
             Some(gw) => gw,
             None => return Err("Gateway do túnel não configurado".into()),
         };
+
+        // Automatically pre-route the /24 cluster subnet so subsequent game connections
+        // (e.g. world loading on port 31000 or channel changes) already have a route in place!
+        let octets = target_ip.octets();
+        let subnet_ip = Ipv4Addr::new(octets[0], octets[1], octets[2], 0);
+        let _ = self.add_subnet_route(pid, subnet_ip, Ipv4Addr::new(255, 255, 255, 0));
 
         if let Some(pids) = self.active_routes.get_mut(&target_ip) {
             if !pids.contains(&pid) {

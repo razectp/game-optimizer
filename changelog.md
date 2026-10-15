@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.3 — 2026-10-14
+
+- **Cluster Subnet Pre-Routing (/24) & Zero-Disconnect World Loading**:
+  - Automatically pre-routes the game server cluster `/24` subnet (`A.B.C.0/24`) alongside the host route (`A.B.C.D/32`). Subsequent connections to world servers, map instances, or loading ports (e.g. MIR4 port 31000/32000) are already present in the Windows routing table from packet #0 (the very first TCP SYN packet).
+  - Protected in-flight game loading sockets from violent TCP resets: restricted `SetTcpEntry` socket migration exclusively to the initial pass when migrating games that were already running before the tunnel started (`initial_migration_done`).
+  - Completely eliminated the game disconnect and freeze when transitioning from character select to loading into the game world.
+
 ## 0.6.2 — 2026-10-14
 
 - **Instant Game Socket Routing & Anti-Freeze Webview/OAuth Protection**:

@@ -71,6 +71,10 @@ pub struct TunnelManager {
     last_ping: Option<(u32, Instant)>,
     /// Status text.
     status_text: String,
+    /// Whether an initial migration of already-established game sockets was executed.
+    initial_migration_done: bool,
+    /// Discovered game server subnets (/24) for pre-routing future game connections.
+    discovered_subnets: HashSet<Ipv4Addr>,
 }
 
 impl TunnelManager {
@@ -91,6 +95,8 @@ impl TunnelManager {
             active_connections: HashMap::new(),
             last_ping: None,
             status_text: "Túnel pronto.".into(),
+            initial_migration_done: false,
+            discovered_subnets: HashSet::new(),
         }
     }
 
@@ -153,6 +159,7 @@ impl TunnelManager {
                 self.last_known_pids.clear();
                 self.active_connections.clear();
             }
+            self.initial_migration_done = false;
             self.health = TunnelHealth::Idle;
             self.status_text = "Túnel em repouso (aguardando jogo).".into();
             return report;
@@ -236,6 +243,14 @@ impl TunnelManager {
 
         // 5. If and ONLY IF the tunnel is verified Healthy, route game connections through the tunnel!
         if self.health == TunnelHealth::Healthy {
+            // Pre-route all previously discovered game subnets (/24) so that newly opening
+            // game sockets (like port 31000 world loading) ALREADY match the tunnel route from their very first SYN packet!
+            for &subnet in &self.discovered_subnets {
+                for &pid in &current_set {
+                    let _ = self.route_mgr.add_subnet_route(pid, subnet, Ipv4Addr::new(255, 255, 255, 0));
+                }
+            }
+
             let connections = find_game_remote_ips(&current_set);
             let endpoint_ip = self.config.resolve_endpoint_ip();
 
@@ -246,14 +261,23 @@ impl TunnelManager {
                     }
                 }
 
+                // Remember this game server's /24 cluster subnet
+                let octets = conn.remote_ip.octets();
+                let subnet = Ipv4Addr::new(octets[0], octets[1], octets[2], 0);
+                self.discovered_subnets.insert(subnet);
+
                 match self.route_mgr.add_game_route(conn.pid, conn.remote_ip) {
                     Ok(newly_added) => {
                         if newly_added {
                             report.newly_routed.push(conn.clone());
-                            // If this was an already-established game TCP connection,
-                            // reset it so the game client immediately reconnects and binds
-                            // to the newly injected tunnel route (ExitLag behavior).
-                            if conn.protocol == "TCP" && crate::tunnel::sockets::is_game_port(conn.remote_port) {
+                            // Only reset TCP connections during the INITIAL migration pass for a game
+                            // that was ALREADY established on the physical adapter BEFORE the tunnel started.
+                            // Connections created while the tunnel is running (like port 31000 world loading)
+                            // are NEVER reset, preventing mid-load disconnects.
+                            if !self.initial_migration_done
+                                && conn.protocol == "TCP"
+                                && crate::tunnel::sockets::is_game_port(conn.remote_port)
+                            {
                                 crate::tunnel::sockets::reset_tcp_connection(conn.pid, conn.remote_ip);
                             }
                         }
@@ -267,6 +291,10 @@ impl TunnelManager {
                     }
                 }
             }
+
+            // Mark initial migration done so future connections (e.g. world loading, map changes)
+            // will NEVER be violently reset while in-flight!
+            self.initial_migration_done = true;
 
             // Apply any custom configured routes for games
             for custom in &self.config.custom_routes {
@@ -321,6 +349,7 @@ impl TunnelManager {
             crate::tunnel::routes::cleanup_stale_gateway_routes(gw);
         }
         self.health = TunnelHealth::Idle;
+        self.initial_migration_done = false;
         self.last_known_pids.clear();
         self.active_connections.clear();
     }
