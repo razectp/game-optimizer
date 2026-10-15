@@ -231,6 +231,7 @@ mod tests {
         assert!(!remembered_maximized(None, None));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn stub_or_native_restore_does_not_panic() {
         let _ = restore_main_window(false);

@@ -348,11 +348,13 @@ mod tests {
 
     #[test]
     fn conf_generation_includes_table_off() {
-        let mut cfg = WireGuardConfig::default();
-        cfg.endpoint = "198.51.100.1:51820".into();
-        cfg.private_key = "CLIENT_PRIV".into();
-        cfg.peer_public_key = "SERVER_PUB".into();
-        cfg.tunnel_ip = "10.0.0.2".into();
+        let cfg = WireGuardConfig {
+            endpoint: "198.51.100.1:51820".into(),
+            private_key: "CLIENT_PRIV".into(),
+            peer_public_key: "SERVER_PUB".into(),
+            tunnel_ip: "10.0.0.2".into(),
+            ..WireGuardConfig::default()
+        };
 
         let conf = cfg.generate_conf();
         assert!(conf.contains("Table = off"));
@@ -363,8 +365,10 @@ mod tests {
 
     #[test]
     fn resolve_endpoint_ipv4() {
-        let mut cfg = WireGuardConfig::default();
-        cfg.endpoint = "127.0.0.1:51820".into();
+        let cfg = WireGuardConfig {
+            endpoint: "127.0.0.1:51820".into(),
+            ..WireGuardConfig::default()
+        };
         assert_eq!(cfg.resolve_endpoint_ip(), Some(Ipv4Addr::new(127, 0, 0, 1)));
     }
 
@@ -387,8 +391,14 @@ mod tests {
 
         let cfg = WireGuardConfig::parse_conf(conf_text).expect("deve fazer o parse com sucesso");
         assert!(cfg.enabled);
-        assert_eq!(cfg.private_key, "aGVsbG9fd2lyZWd1YXJkX3ByaXZhdGVfa2V5X2Jhc2U2NA==");
-        assert_eq!(cfg.peer_public_key, "c2VydmVyX3B1YmxpY19rZXlfYmFzZTY0X2Zvcl90ZXN0aW5n=");
+        assert_eq!(
+            cfg.private_key,
+            "aGVsbG9fd2lyZWd1YXJkX3ByaXZhdGVfa2V5X2Jhc2U2NA=="
+        );
+        assert_eq!(
+            cfg.peer_public_key,
+            "c2VydmVyX3B1YmxpY19rZXlfYmFzZTY0X2Zvcl90ZXN0aW5n="
+        );
         assert_eq!(cfg.endpoint, "203.0.113.50:51820");
         assert_eq!(cfg.tunnel_ip, "10.8.0.5");
         assert_eq!(cfg.tunnel_gateway, "10.8.0.1");

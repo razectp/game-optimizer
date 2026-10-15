@@ -22,6 +22,7 @@ use crate::tunnel::wireguard::WireGuardConfig;
 /// Handle for a running embedded WireGuard tunnel.
 pub struct EmbeddedTunnelHandle {
     stop_flag: Arc<AtomicBool>,
+    session: Arc<wintun::Session>,
     threads: Vec<JoinHandle<()>>,
     /// Windows interface index for GameOptimizerTun.
     pub if_index: u32,
@@ -41,17 +42,25 @@ impl std::fmt::Debug for EmbeddedTunnelHandle {
 
 impl Drop for EmbeddedTunnelHandle {
     fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.stop_and_join();
     }
 }
 
 impl EmbeddedTunnelHandle {
     /// Stop the embedded tunnel worker threads.
     pub fn stop(mut self) {
+        self.stop_and_join();
+    }
+
+    fn stop_and_join(&mut self) {
         self.stop_flag.store(true, Ordering::SeqCst);
+        // Shutdown cancels Wintun's blocking receive; teardown must continue even if it reports an error.
+        let _ = self.session.shutdown();
         let threads = std::mem::take(&mut self.threads);
         for t in threads {
-            let _ = t.join();
+            if t.thread().id() != thread::current().id() {
+                let _ = t.join();
+            }
         }
     }
 
@@ -409,6 +418,7 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
 
     Ok(EmbeddedTunnelHandle {
         stop_flag,
+        session,
         threads,
         if_index,
         handshake_confirmed,

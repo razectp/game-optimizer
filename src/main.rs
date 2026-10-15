@@ -95,6 +95,9 @@ fn main() -> anyhow::Result<()> {
     attach_parent_console();
     let cli = Cli::parse();
 
+    #[cfg(windows)]
+    game_optimizer::win_process::require_administrator()?;
+
     let config_path = cli
         .config
         .clone()

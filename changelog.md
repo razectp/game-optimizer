@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.4 — 2026-10-14
+
+- Installer and PowerShell install/uninstall require administrator authorization while keeping files and preferences in the current Windows profile; Start-with-Windows is configured through the app CLI.
+- The application requires administrator authorization on every unelevated launch. Startup requests normal UAC consent, while the post-install launch inherits Setup's elevated token; test harnesses remain unelevated.
+- Distribution now includes the required `wintun.dll` in both the portable ZIP and setup; packaging fails early if the supplied DLL is missing.
+- Setup version is taken from the built executable, and uninstall removes app-owned binaries while preserving user preferences and unrelated files.
+- Updated Windows CI to format, lint, and test on the platform targeted by the application.
+- GUI watch interval/enabled state and normal window geometry are persisted in the optional `[gui]` config table; enabled watching resumes on launch.
+- Process lists use independent scrolling, including wheel containment at list boundaries; compact layouts keep controls accessible in smaller windows.
+- Preferences are saved atomically by the background worker, and process enumeration no longer blocks the interface. Exiting flushes pending changes and stops the tunnel cleanly.
+
 ## 0.6.3 — 2026-10-14
 
 - **Cluster Subnet Pre-Routing (/24) & Zero-Disconnect World Loading**:

@@ -1,4 +1,5 @@
-# Install Game Optimizer on Windows (end-user, no Rust required).
+﻿#Requires -RunAsAdministrator
+# Install Game Optimizer on Windows (administrator authorization required; per-user files).
 #
 # Default: copy a prebuilt game_optimizer.exe into %LOCALAPPDATA%\GameOptimizer,
 # create Start Menu / Desktop shortcuts, enable Start with Windows, and register
@@ -159,7 +160,7 @@ if (-not $InstallDir) {
 }
 
 $ExeName = "game_optimizer.exe"
-$Version = "0.6.3"
+$Version = ""
 $Publisher = "Game Optimizer"
 
 if ($Build) {
@@ -203,6 +204,22 @@ or run with -Build if you have the Rust toolchain.
 "@
 }
 
+function Set-Autostart {
+    param([string]$Executable, [bool]$Enabled)
+    $mode = if ($Enabled) { "--on" } else { "--off" }
+    $process = Start-Process -FilePath $Executable -ArgumentList @("autostart", $mode) `
+        -WorkingDirectory (Split-Path -Parent $Executable) -Wait -PassThru -NoNewWindow
+    if ($process.ExitCode -ne 0) {
+        throw "Could not configure Start with Windows (autostart $mode; exit code $($process.ExitCode))."
+    }
+}
+$fileVersion = (Get-Item -LiteralPath $SourceExe).VersionInfo.ProductVersion
+if ($fileVersion -match '^(\d+\.\d+\.\d+)(?:\.\d+)?$') { $Version = $Matches[1] }
+if (-not $Version) { throw "Could not determine a semantic application version from $SourceExe (ProductVersion='$fileVersion')." }
+$WintunCandidates = @((Join-Path (Split-Path -Parent $SourceExe) "wintun.dll"), (Join-Path $Root "wintun.dll"), (Join-Path $ScriptDir "wintun.dll"))
+$WintunSource = $WintunCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $WintunSource) { throw "Required wintun.dll was not found beside the executable or package. Re-extract the complete release package." }
+
 $UninstallSrc = Join-Path $ScriptDir "uninstall.ps1"
 if (-not (Test-Path -LiteralPath $UninstallSrc)) {
     throw "uninstall.ps1 not found next to install.ps1: $UninstallSrc"
@@ -222,6 +239,7 @@ Request-CloseGameOptimizer -InstallDir $InstallDir
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $InstalledExe = Join-Path $InstallDir $ExeName
 Copy-Item -LiteralPath $SourceExe -Destination $InstalledExe -Force
+Copy-Item -LiteralPath $WintunSource -Destination (Join-Path $InstallDir "wintun.dll") -Force
 
 $ConfigSrc = Find-GamesToml -RootDir $Root -ScriptDir $ScriptDir -ExePath $SourceExe
 $ConfigDest = Join-Path $InstallDir "games.toml"
@@ -244,12 +262,6 @@ $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 foreach ($extraName in @("Game Optimizer", "game_optimizer", "game_optimizer.exe", "GameOptimizer.exe")) {
     Remove-ItemProperty -Path $RunKey -Name $extraName -ErrorAction SilentlyContinue
 }
-$LmRun = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
-if (Test-Path -LiteralPath $LmRun) {
-    foreach ($extraName in @("GameOptimizer", "Game Optimizer", "game_optimizer", "game_optimizer.exe", "GameOptimizer.exe")) {
-        Remove-ItemProperty -Path $LmRun -Name $extraName -ErrorAction SilentlyContinue
-    }
-}
 $StartupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
 foreach ($lnk in @("Game Optimizer.lnk", "GameOptimizer.lnk", "game_optimizer.lnk")) {
     $p = Join-Path $StartupDir $lnk
@@ -257,8 +269,8 @@ foreach ($lnk in @("Game Optimizer.lnk", "GameOptimizer.lnk", "game_optimizer.ln
 }
 
 $autostartOn = -not $NoAutostart
+Set-Autostart -Executable $InstalledExe -Enabled $autostartOn
 if ($autostartOn) {
-    Set-ItemProperty -Path $RunKey -Name "GameOptimizer" -Value "`"$InstalledExe`" --gui"
     Write-Host "Início automático ativado (HKCU Run)."
 } else {
     Remove-ItemProperty -Path $RunKey -Name "GameOptimizer" -ErrorAction SilentlyContinue

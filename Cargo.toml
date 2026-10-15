@@ -1,13 +1,21 @@
 [package]
 name = "game_optimizer"
-version = "0.6.3"
+version = "0.6.4"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.95"
 description = "Windows game performance optimizer with GUI, tray, and installer"
 license = "MIT"
 publish = false
 
 build = "build.rs"
+
+# The executable is elevation-only; its domain tests live in the library.
+# Do not generate an empty main.rs test/benchmark harness that would require UAC.
+[[bin]]
+name = "game_optimizer"
+path = "src/main.rs"
+test = false
+bench = false
 
 [build-dependencies]
 winresource = "0.1.23"
@@ -39,6 +47,7 @@ windows = { version = "0.62.2", features = [
   "Win32_System_SystemInformation",
   "Win32_System_Memory",
   "Win32_System_Console",
+  "Win32_System_Registry",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
   "Win32_NetworkManagement_IpHelper",

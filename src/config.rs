@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +13,8 @@ use crate::tunnel::WireGuardConfig;
 /// Runtime settings and game name allowlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
+    /// GUI preferences persisted alongside optimizer settings.
+    pub gui: GuiPreferences,
     /// Process names treated as games (lowercase, without `.exe`).
     pub game_names: BTreeSet<String>,
     /// Non-game names that must never be working-set trimmed (editors/shells/encoders).
@@ -43,9 +47,48 @@ pub struct AppConfig {
     pub source_path: Option<PathBuf>,
 }
 
+/// User interface preferences persisted in `[gui]`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuiPreferences {
+    /// Process watcher interval in seconds (15–120).
+    pub watch_interval_secs: u64,
+    /// Whether process watching starts enabled.
+    pub watch_enabled: bool,
+    /// Window width in pixels (minimum 640).
+    pub window_width: u32,
+    /// Window height in pixels (minimum 420).
+    pub window_height: u32,
+    /// Whether the window was maximized.
+    pub window_maximized: bool,
+}
+
+impl Default for GuiPreferences {
+    fn default() -> Self {
+        Self {
+            watch_interval_secs: 45,
+            watch_enabled: false,
+            window_width: 880,
+            window_height: 560,
+            window_maximized: false,
+        }
+    }
+}
+
+impl GuiPreferences {
+    /// Clamp persisted preferences to safe operational dimensions and interval.
+    pub fn normalized(mut self) -> Self {
+        self.watch_interval_secs = self.watch_interval_secs.clamp(15, 120);
+        self.window_width = self.window_width.clamp(640, 16384);
+        self.window_height = self.window_height.clamp(420, 16384);
+        self
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            gui: GuiPreferences::default(),
             game_names: GameCatalog::builtin_names(),
             never_trim_names: GameCatalog::builtin_never_trim_names(),
             reclaim_names: GameCatalog::builtin_reclaim_names(),
@@ -71,16 +114,26 @@ impl AppConfig {
         crate::autostart::data_dir().join("config.toml")
     }
 
-    /// Load configuration preferring `%LOCALAPPDATA%\GameOptimizer\config.toml`, then `games.toml`.
+    /// Load the explicitly supplied existing path first, then the user config and legacy paths.
     pub fn load_or_default(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let path = path.as_ref();
         let user_path = Self::user_config_path();
-        if user_path.exists() {
+        if path == user_path {
+            if user_path.exists() {
+                let raw = fs::read_to_string(&user_path)?;
+                let file: ConfigFile = toml::from_str(&raw)?;
+                return Ok(Self::from_file(file, Some(user_path)));
+            }
+        } else if path.exists() {
+            let raw = fs::read_to_string(path)?;
+            let file: ConfigFile = toml::from_str(&raw)?;
+            return Ok(Self::from_file(file, Some(path.to_path_buf())));
+        } else if user_path.exists() {
             let raw = fs::read_to_string(&user_path)?;
             let file: ConfigFile = toml::from_str(&raw)?;
             return Ok(Self::from_file(file, Some(user_path)));
         }
 
-        let path = path.as_ref();
         let local_sibling = path.with_file_name("games.local.toml");
         let target_path = if local_sibling.exists() {
             Some(local_sibling)
@@ -125,12 +178,13 @@ impl AppConfig {
     /// Save current configuration back to a TOML file.
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> anyhow::Result<()> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
         }
         let file = ConfigFile {
             games: GamesSection {
                 names: self.game_names.iter().cloned().collect(),
+                snapshot: Some(true),
             },
             settings: SettingsSection {
                 boost_priority: Some(self.boost_priority),
@@ -145,12 +199,13 @@ impl AppConfig {
                 max_trim_candidates: Some(self.max_trim_candidates),
                 never_trim_names: Some(self.never_trim_names.iter().cloned().collect()),
                 reclaim_names: Some(self.reclaim_names.iter().cloned().collect()),
+                lists_snapshot: Some(true),
             },
             wireguard: Some(self.wireguard.clone()),
+            gui: Some(self.gui.clone().normalized()),
         };
         let raw = toml::to_string_pretty(&file)?;
-        fs::write(path, raw)?;
-        Ok(())
+        atomic_write(path, raw.as_bytes())
     }
 
     /// Return user-added game names (excluding the builtin catalog).
@@ -209,20 +264,33 @@ impl AppConfig {
     }
 
     fn from_file(file: ConfigFile, source_path: Option<PathBuf>) -> Self {
-        let mut names = GameCatalog::builtin_names();
+        let mut names = if file.games.snapshot.unwrap_or(false) {
+            BTreeSet::new()
+        } else {
+            GameCatalog::builtin_names()
+        };
         for name in file.games.names {
             names.insert(normalize_process_name(&name));
         }
-        let mut never_trim = GameCatalog::builtin_never_trim_names();
+        let mut never_trim = if file.settings.lists_snapshot.unwrap_or(false) {
+            BTreeSet::new()
+        } else {
+            GameCatalog::builtin_never_trim_names()
+        };
         for name in file.settings.never_trim_names.unwrap_or_default() {
             never_trim.insert(normalize_process_name(&name));
         }
-        let mut reclaim = GameCatalog::builtin_reclaim_names();
+        let mut reclaim = if file.settings.lists_snapshot.unwrap_or(false) {
+            BTreeSet::new()
+        } else {
+            GameCatalog::builtin_reclaim_names()
+        };
         for name in file.settings.reclaim_names.unwrap_or_default() {
             reclaim.insert(normalize_process_name(&name));
         }
         let threshold_mb = file.settings.memory_trim_threshold_mb.unwrap_or(200);
         Self {
+            gui: file.gui.unwrap_or_default().normalized(),
             game_names: names,
             never_trim_names: never_trim,
             reclaim_names: reclaim,
@@ -240,6 +308,57 @@ impl AppConfig {
             source_path,
         }
     }
+}
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_write(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("configuration path has no file name"))?;
+    let mut temp_path = None;
+    let mut file = None;
+    for _ in 0..100 {
+        let id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".{}.{}.{}.tmp",
+            name.to_string_lossy(),
+            std::process::id(),
+            id
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(created) => {
+                temp_path = Some(candidate);
+                file = Some(created);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let temp_path = temp_path
+        .ok_or_else(|| anyhow::anyhow!("could not allocate unique temporary config file"))?;
+    let result = (|| -> anyhow::Result<()> {
+        let mut file = file.expect("temporary file created with path");
+        file.write_all(contents)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
 }
 
 /// Built-in known game process names.
@@ -371,6 +490,9 @@ pub struct ConfigFile {
     /// WireGuard embedded tunnel section.
     #[serde(default)]
     pub wireguard: Option<WireGuardConfig>,
+    /// GUI preferences.
+    #[serde(default)]
+    pub gui: Option<GuiPreferences>,
 }
 
 /// `[games]` table.
@@ -379,11 +501,17 @@ pub struct GamesSection {
     /// Extra process names (with or without `.exe`).
     #[serde(default)]
     pub names: Vec<String>,
+    /// When true, `names` is a complete list including removals from built-ins.
+    #[serde(default)]
+    pub snapshot: Option<bool>,
 }
 
 /// `[settings]` table.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct SettingsSection {
+    /// When true, the two name arrays below are complete lists.
+    #[serde(default)]
+    pub lists_snapshot: Option<bool>,
     /// Raise game priority to High.
     pub boost_priority: Option<bool>,
     /// Disable Windows execution-speed power throttling on games.
@@ -436,6 +564,18 @@ pub fn game_path_markers() -> &'static [&'static str] {
 mod tests {
     use super::*;
 
+    fn sandbox() -> PathBuf {
+        let root = std::env::temp_dir().join("opencode");
+        fs::create_dir_all(&root).unwrap();
+        let dir = root.join(format!(
+            "config-tests-{}-{}",
+            std::process::id(),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn normalize_strips_exe_and_case() {
         assert_eq!(normalize_process_name("SampleGame.EXE"), "samplegame");
@@ -454,9 +594,11 @@ mod tests {
         let file = ConfigFile {
             games: GamesSection {
                 names: vec!["MyGame.EXE".into()],
+                ..GamesSection::default()
             },
             settings: SettingsSection::default(),
             wireguard: None,
+            gui: None,
         };
         let cfg = AppConfig::from_file(file, None);
         assert!(cfg.game_names.contains("mygame"));
@@ -476,6 +618,7 @@ mod tests {
                 ..SettingsSection::default()
             },
             wireguard: None,
+            gui: None,
         };
         let cfg = AppConfig::from_file(file, None);
         assert!(cfg.reclaim_names.contains("mybrowser"));
@@ -495,11 +638,15 @@ mod tests {
 
     #[test]
     fn config_includes_wireguard() {
-        let mut file = ConfigFile::default();
-        let mut wg = WireGuardConfig::default();
-        wg.enabled = true;
-        wg.endpoint = "1.2.3.4:51820".into();
-        file.wireguard = Some(wg);
+        let wg = WireGuardConfig {
+            enabled: true,
+            endpoint: "1.2.3.4:51820".into(),
+            ..WireGuardConfig::default()
+        };
+        let file = ConfigFile {
+            wireguard: Some(wg),
+            ..ConfigFile::default()
+        };
 
         let cfg = AppConfig::from_file(file, None);
         assert!(cfg.wireguard.enabled);
@@ -509,14 +656,20 @@ mod tests {
     #[test]
     fn custom_game_and_trim_management() {
         let mut cfg = AppConfig::default();
-        assert!(!cfg.user_custom_games().contains(&"mycustomgame".to_string()));
+        assert!(!cfg
+            .user_custom_games()
+            .contains(&"mycustomgame".to_string()));
 
         assert!(cfg.add_game_name("MyCustomGame.exe"));
-        assert!(cfg.user_custom_games().contains(&"mycustomgame".to_string()));
+        assert!(cfg
+            .user_custom_games()
+            .contains(&"mycustomgame".to_string()));
         assert!(cfg.game_names.contains("mycustomgame"));
 
         assert!(cfg.remove_game_name("MyCustomGame"));
-        assert!(!cfg.user_custom_games().contains(&"mycustomgame".to_string()));
+        assert!(!cfg
+            .user_custom_games()
+            .contains(&"mycustomgame".to_string()));
 
         cfg.add_reclaim_name("CustomBrowser.exe");
         assert!(cfg.reclaim_names.contains("custombrowser"));
@@ -533,5 +686,104 @@ mod tests {
     fn user_config_path_ends_with_config_toml() {
         let path = AppConfig::user_config_path();
         assert!(path.ends_with("config.toml"));
+    }
+
+    #[test]
+    fn gui_defaults_and_normalization() {
+        assert_eq!(GuiPreferences::default().watch_interval_secs, 45);
+        let normalized = GuiPreferences {
+            watch_interval_secs: 1,
+            window_width: 1,
+            window_height: u32::MAX,
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(normalized.watch_interval_secs, 15);
+        assert_eq!(normalized.window_width, 640);
+        assert_eq!(normalized.window_height, 16384);
+    }
+
+    #[test]
+    fn old_file_defaults_and_roundtrip_preserves_list_removals_and_additions() {
+        let dir = sandbox();
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            "[games]\nnames = [\"custom.exe\"]\n[settings]\nboost_priority = false\n",
+        )
+        .unwrap();
+        let mut cfg = AppConfig::load_or_default(&path).unwrap();
+        assert_eq!(cfg.gui, GuiPreferences::default());
+        assert!(!cfg.boost_priority);
+        cfg.remove_game_name("cs2");
+        cfg.add_game_name("new-game");
+        cfg.remove_reclaim_name("chrome");
+        cfg.add_reclaim_name("custom-browser");
+        cfg.remove_never_trim_name("ffmpeg");
+        cfg.add_never_trim_name("custom-protected");
+        cfg.gui.watch_enabled = true;
+        cfg.gui.watch_interval_secs = 73;
+        cfg.gui.window_width = 1024;
+        cfg.gui.window_height = 768;
+        cfg.gui.window_maximized = true;
+        cfg.wireguard.enabled = true;
+        cfg.wireguard.endpoint = "198.51.100.10:51820".into();
+        cfg.save_to_path(&path).unwrap();
+        let loaded = AppConfig::load_or_default(&path).unwrap();
+        assert!(!loaded.game_names.contains("cs2"));
+        assert!(loaded.game_names.contains("new-game"));
+        assert!(!loaded.reclaim_names.contains("chrome"));
+        assert!(loaded.reclaim_names.contains("custom-browser"));
+        assert!(!loaded.never_trim_names.contains("ffmpeg"));
+        assert!(loaded.never_trim_names.contains("custom-protected"));
+        assert!(loaded.gui.watch_enabled);
+        assert_eq!(loaded.gui.watch_interval_secs, 73);
+        assert_eq!(
+            (loaded.gui.window_width, loaded.gui.window_height),
+            (1024, 768)
+        );
+        assert!(loaded.gui.window_maximized);
+        assert!(loaded.wireguard.enabled);
+        assert_eq!(loaded.wireguard.endpoint, "198.51.100.10:51820");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_failure_keeps_target_directory_and_cleans_temp() {
+        let dir = sandbox();
+        let path = dir.join("config.toml");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("sentinel"), "preserve").unwrap();
+        assert!(atomic_write(&path, b"replacement").is_err());
+        assert_eq!(
+            fs::read_to_string(path.join("sentinel")).unwrap(),
+            "preserve"
+        );
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "failed rename must remove its temporary file"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_file() {
+        let dir = sandbox();
+        let path = dir.join("config.toml");
+        fs::write(&path, "before").unwrap();
+        atomic_write(&path, b"after").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"after");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn save_creates_file_in_existing_sandbox_directory() {
+        let dir = sandbox();
+        let path = dir.join("config.toml");
+        AppConfig::default().save_to_path(&path).unwrap();
+        assert!(path.exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

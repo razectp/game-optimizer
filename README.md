@@ -12,18 +12,20 @@ if the window was maximized. Start with Windows is enabled by default.
 ## Requirements
 
 - Windows 10/11
-- **Administrator** recommended for full process-control rights on games
+- **Administrator authorization required** to install, uninstall, and run the app
 
 ## Install (end users)
 
 No Rust toolchain is required. Download a packaged build from
 [GitHub Releases](https://github.com/razectp/game-optimizer/releases):
 
-1. **Setup (recommended):** run `GameOptimizer-0.6.3-setup.exe` and follow the
-   setup wizard (language, welcome, license, folder, shortcuts). Over an
+1. **Setup (recommended):** run `GameOptimizer-0.6.4-setup.exe`, approve the
+   Windows administrator prompt, and follow the setup wizard (language, welcome,
+   license, folder, shortcuts). The app and preferences remain in the current
+   user's `%LOCALAPPDATA%`. If you enter credentials for a different Windows
+   account, per-user settings and shortcuts may apply to that account instead. Over an
    existing install it shows an update page and asks to close the running app.
-2. **Portable:** run `GameOptimizer-0.6.3.exe`, or extract
-   `GameOptimizer-0.6.3-windows.zip` and install:
+2. **Portable:** extract `GameOptimizer-0.6.4-windows.zip` and install:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -37,6 +39,7 @@ powershell -ExecutionPolicy Bypass -File .\installer\install.ps1
 powershell -ExecutionPolicy Bypass -File .\installer\install.ps1 -Build
 ```
 
+The portable install script also requires an elevated PowerShell session.
 Installs to `%LOCALAPPDATA%\GameOptimizer`, creates Start Menu / Desktop
 shortcuts, registers **Apps & features** uninstall, and enables auto-start.
 Use `-NoAutostart` to skip the Run key. Uninstall from Apps & features, or:
@@ -45,16 +48,26 @@ Use `-NoAutostart` to skip the Run key. Uninstall from Apps & features, or:
 powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\GameOptimizer\uninstall.ps1"
 ```
 
-The Inno installer is a full setup wizard (no admin). Portable launches show a
-first-run wizard in the app; reopen it with `--setup` or **Mais opções**.
-The GUI checks GitHub Releases for updates and can download the setup installer.
+The setup executable has a language, license, install-folder, and shortcut wizard.
+The app itself does not currently show a first-run onboarding wizard or an
+in-app updater. Settings are stored in `%LOCALAPPDATA%\GameOptimizer\config.toml`;
+upgrades and uninstall preserve that profile and unrelated files.
 
-```powershell
-.\target\release\game_optimizer.exe --setup
-```
+Windows requests administrator authorization (UAC) whenever the app is opened
+from an unelevated session. Canceling that prompt leaves the app closed. When
+launching the app at the end of Setup, it inherits the authorization already
+granted to the installer.
 
-Maintainers can produce the zip + Inno inputs with `installer\package.ps1`,
-then `iscc installer\GameOptimizer.iss`.
+Start with Windows remains optional and per-user. Its startup entry requests
+normal UAC authorization for the app at sign-in; it does not bypass UAC or create
+an elevated scheduled task. Command-line users must open an administrator
+terminal before running the executable directly.
+
+Maintainers can run `installer\package.ps1` to build the isolated release binary
+under `target\package`, stage the allowlisted payload in `dist\GameOptimizer`,
+and produce the ZIP. To build the setup, compile `installer\GameOptimizer.iss`
+with Inno Setup 6 (`ISCC.exe installer\GameOptimizer.iss`). Both packages use
+the supplied, unmodified `wintun.dll`; packaging refuses to proceed without it.
 
 ## Build / run (developers)
 
@@ -64,7 +77,6 @@ cargo build --release
 # GUI (default)
 .\target\release\game_optimizer.exe
 .\target\release\game_optimizer.exe --gui
-.\target\release\game_optimizer.exe --setup
 
 # CLI
 .\target\release\game_optimizer.exe scan
@@ -80,7 +92,8 @@ cargo build --release
 .\target\release\game_optimizer.exe tunnel --export-conf .\GameOptTunnel.conf
 ```
 
-Requires Rust stable 1.85+.
+Requires Rust stable 1.95+, the Windows MSVC toolchain, and the Windows SDK.
+Only the application binary requires elevation; the unit-test harness does not.
 
 ## What GPC does
 
@@ -93,17 +106,36 @@ Requires Rust stable 1.85+.
 | CPU-set / affinity partition | Split cores across multi-instance games |
 | Non-game WS trim | Reclaims **browsers only** (Chrome/Edge/Firefox/…) |
 | Trim memória do jogo | Optional empty of game working sets |
-| Tunelamento VPS (WireGuard) | Roteia exclusivamente as conexões dos jogos pela VPS (zero injeção de DLL, seguro contra anti-cheats) |
+| Tunelamento VPS (WireGuard) | Encaminha destinos de rede associados ao jogo pela VPS, conforme configuração; não injeta código no processo do jogo |
 
 ## Tunelamento WireGuard (VPS)
 
 Permite acelerar rotas de jogos usando uma VPS própria com WireGuard:
-- **Isolamento por PID:** O programa monitora a tabela de sockets do Windows (`iphlpapi.dll`). Quando um jogo abre conexão para um servidor, apenas o tráfego daquele destino é roteado pela VPS. Navegadores, Discord e o resto do sistema continuam na internet normal.
-- **Zero injeção de DLL:** Não toca na memória nem nos arquivos do jogo, sendo 100% seguro contra anti-cheats (Vanguard, EAC, BattlEye, Ricochet).
+- **Seleção de destinos:** O programa observa conexões associadas aos processos de jogo e adiciona rotas do Windows para destinos selecionados. Isso não equivale a isolamento completo por processo; o comportamento depende da tabela de rotas e da configuração da VPS.
+- **Sem injeção no processo do jogo:** O túnel não injeta código no processo do jogo. Isso não garante compatibilidade com todo anti-cheat; consulte as regras do jogo e do provedor.
 - **Configuração Embutida ou Importação .conf:** Configure pela interface gráfica (`🛡️ Túnel VPS`), importando seu arquivo `.conf` do WireGuard diretamente no app.
 
-The GUI can also clean the **user Temp / INetCache** folders (confirm in the
-UI). Shader caches, Prefetch, and Windows Update files are never touched.
+The project contains cache-cleanup support, but it is not currently exposed as
+a connected GUI action.
+
+## Saved GUI preferences
+
+The optional `[gui]` table in `%LOCALAPPDATA%\GameOptimizer\config.toml` stores
+the process-watch interval and enabled state, plus normal window dimensions and
+maximized state. For example:
+
+```toml
+[gui]
+watch_interval_secs = 45
+watch_enabled = false
+window_width = 880
+window_height = 560
+window_maximized = false
+```
+
+The watch interval is normalized to 15–120 seconds. Existing configuration
+files without `[gui]` continue to load with defaults; when watch is enabled, the
+GUI resumes it at startup.
 
 ## Adding games or apps
 

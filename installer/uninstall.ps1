@@ -1,4 +1,5 @@
-﻿# Uninstall Game Optimizer
+﻿#Requires -RunAsAdministrator
+# Uninstall Game Optimizer (administrator authorization required; current profile only).
 #
 # Removes the LocalAppData install, HKCU Run key, Start Menu / Desktop
 # shortcuts, and Add/Remove Programs registration.
@@ -127,12 +128,6 @@ $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 foreach ($name in @("GameOptimizer", "Game Optimizer", "game_optimizer", "game_optimizer.exe", "GameOptimizer.exe")) {
     Remove-ItemProperty -Path $RunKey -Name $name -ErrorAction SilentlyContinue
 }
-$LmRun = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
-if (Test-Path -LiteralPath $LmRun) {
-    foreach ($name in @("GameOptimizer", "Game Optimizer", "game_optimizer", "game_optimizer.exe", "GameOptimizer.exe")) {
-        Remove-ItemProperty -Path $LmRun -Name $name -ErrorAction SilentlyContinue
-    }
-}
 $StartupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
 foreach ($lnk in @("Game Optimizer.lnk", "GameOptimizer.lnk", "game_optimizer.lnk")) {
     Remove-ItemIfExists -Path (Join-Path $StartupDir $lnk)
@@ -152,13 +147,22 @@ Remove-ItemIfExists -Path $Desktop
 Write-Host "Atalhos removidos (se existiam)."
 
 if (Test-Path -LiteralPath $InstallDir) {
-    Remove-ItemIfExists -Path $InstallDir -Recurse
-    if (Test-Path -LiteralPath $InstallDir) {
-        Write-Host "Não foi possível apagar completamente: $InstallDir"
-        Write-Host "Feche o Game Optimizer e apague a pasta manualmente se ainda existir."
-        Write-Host "Could not fully delete the install folder. Close the app and remove it manually if needed."
-    } else {
+    # Remove only files owned by the application. Keep config.toml, games.toml,
+    # user lists/settings, and any unrelated files in the profile/install folder.
+    foreach ($ownedFile in @("game_optimizer.exe", "wintun.dll", "uninstall.ps1", "install.ps1", "icon.ico", ".autostart-initialized", ".setup-wizard-complete")) {
+        Remove-ItemIfExists -Path (Join-Path $InstallDir $ownedFile)
+    }
+    # Directory.Delete(false) refuses a nonempty directory without prompting
+    # for recursive removal of the preserved profile or unrelated files.
+    try {
+        [System.IO.Directory]::Delete($InstallDir, $false)
+    } catch {
+        Write-Verbose "Install folder retained: $($_.Exception.Message)"
+    }
+    if (-not (Test-Path -LiteralPath $InstallDir)) {
         Write-Host "Pasta de instalação removida: $InstallDir"
+    } else {
+        Write-Host "Preferências e/ou arquivos não pertencentes ao aplicativo foram preservados em: $InstallDir"
     }
 } else {
     Write-Host "Pasta de instalação não encontrada (ok): $InstallDir"

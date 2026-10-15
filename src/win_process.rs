@@ -11,8 +11,9 @@ use std::sync::Once;
 use windows::core::{HRESULT, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LUID};
 use windows::Win32::Security::{
-    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
-    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    AdjustTokenPrivileges, GetTokenInformation, LookupPrivilegeValueW, TokenElevation,
+    LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION,
+    TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows::Win32::System::SystemInformation::{
@@ -30,6 +31,40 @@ use windows::Win32::System::Threading::{
 use crate::optimize::{ActionResult, OptimizeAction};
 
 static PRIVILEGE_INIT: Once = Once::new();
+
+/// Refuse functional application startup unless the current token is elevated.
+pub fn require_administrator() -> anyhow::Result<()> {
+    check_elevation(current_process_is_elevated()?)
+}
+
+fn check_elevation(elevated: bool) -> anyhow::Result<()> {
+    if !elevated {
+        anyhow::bail!("O Game Optimizer precisa ser executado como administrador. Abra o programa e autorize a confirmação do Windows (UAC).");
+    }
+    Ok(())
+}
+
+fn current_process_is_elevated() -> windows::core::Result<bool> {
+    let mut token = HANDLE::default();
+    // SAFETY: the current-process handle is valid and `token` is writable.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)? };
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut returned = 0u32;
+    // SAFETY: a live token and an aligned TOKEN_ELEVATION buffer of the stated size.
+    let query = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(std::ptr::from_mut(&mut elevation).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    };
+    // SAFETY: this function owns the handle and releases it on success and error.
+    let _ = unsafe { CloseHandle(token) };
+    query?;
+    Ok(elevation.TokenIsElevated != 0)
+}
 
 /// Best-effort enable of `SeDebugPrivilege` (helps open game processes when elevated).
 pub fn enable_debug_privilege() {
@@ -460,6 +495,19 @@ where
 mod tests {
     use super::*;
     use crate::optimize::OptimizeAction;
+
+    #[test]
+    fn administrator_gate_accepts_only_an_elevated_token() {
+        assert!(check_elevation(true).is_ok());
+        assert!(check_elevation(false).is_err());
+    }
+
+    #[test]
+    fn administrator_gate_matches_the_current_process_token() {
+        let elevated =
+            current_process_is_elevated().expect("current process token must be queryable");
+        assert_eq!(require_administrator().is_ok(), elevated);
+    }
 
     #[test]
     fn refuse_pid_zero_open() {

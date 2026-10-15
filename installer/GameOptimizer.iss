@@ -1,9 +1,28 @@
-; Game Optimizer — per-user Inno Setup wizard (no admin required).
+; Game Optimizer — per-user install location; administrator authorization required.
 ; Compile: iscc installer\GameOptimizer.iss
-; Requires a release binary at ..\target\release\game_optimizer.exe
+; Requires the validated payload at ..\dist\GameOptimizer\ (run package.ps1 first).
 
 #define AppName "Game Optimizer"
-#define AppVersion "0.6.3"
+#define PackageDir SourcePath + "\\..\\dist\\GameOptimizer"
+#if !FileExists(PackageDir + "\\game_optimizer.exe")
+  #error "Package payload missing: run installer\\package.ps1 first (game_optimizer.exe)."
+#endif
+#if !FileExists(PackageDir + "\\wintun.dll")
+  #error "Package payload missing required wintun.dll: run installer\\package.ps1 first."
+#endif
+#if !FileExists(PackageDir + "\\uninstall.ps1")
+  #error "Package payload missing uninstall.ps1: run installer\\package.ps1 first."
+#endif
+#if defined(GetVersionNumbersString)
+  #define AppVersionFull GetVersionNumbersString(PackageDir + "\\game_optimizer.exe")
+#else
+  #define AppVersionFull GetFileVersion(PackageDir + "\\game_optimizer.exe")
+#endif
+#if Copy(AppVersionFull, Len(AppVersionFull) - 1, 2) == ".0"
+  #define AppVersion Copy(AppVersionFull, 1, Len(AppVersionFull) - 2)
+#else
+  #define AppVersion AppVersionFull
+#endif
 #define AppPublisher "Game Optimizer"
 #define AppExeName "game_optimizer.exe"
 #define AppMutexName "GameOptimizer"
@@ -27,7 +46,7 @@ DisableReadyPage=no
 DisableFinishedPage=no
 AlwaysShowDirOnReadyPage=yes
 ShowTasksTreeLines=yes
-PrivilegesRequired=lowest
+PrivilegesRequired=admin
 OutputDir=..\dist
 OutputBaseFilename=GameOptimizer-{#AppVersion}-setup
 Compression=lzma2
@@ -37,7 +56,9 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 WizardSizePercent=120
+#if VER < EncodeVer(6, 7, 0, 0)
 WizardResizable=yes
+#endif
 WizardImageFile=wizard-sidebar.bmp
 WizardSmallImageFile=wizard-small.bmp
 UninstallDisplayIcon={app}\{#AppExeName}
@@ -60,9 +81,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"; InfoBeforeFile: "welcome-
 brazilianportuguese.BeveledLabel=Game Optimizer
 english.BeveledLabel=Game Optimizer
 brazilianportuguese.WelcomeLabel1=Bem-vindo ao assistente de instalação do [name]
-brazilianportuguese.WelcomeLabel2=Este assistente vai instalar o [name/ver] nesta conta do Windows. Não precisa de administrador.%n%nO Game Optimizer deixa seus jogos mais fluidos e nunca fecha nenhum jogo.%n%nClique em Avançar para continuar.
+brazilianportuguese.WelcomeLabel2=Este assistente vai instalar o [name/ver] no perfil Windows atual. É necessária autorização de administrador; a instalação e as preferências continuam nesta conta.%n%nO Game Optimizer deixa seus jogos mais fluidos e nunca fecha nenhum jogo.%n%nClique em Avançar para continuar.
 english.WelcomeLabel1=Welcome to the [name] Setup Wizard
-english.WelcomeLabel2=This will install [name/ver] for this Windows account. Administrator rights are not required.%n%nGame Optimizer keeps your games smoother and never closes them.%n%nClick Next to continue.
+english.WelcomeLabel2=This installs [name/ver] for the current Windows profile. Administrator authorization is required; installation and preferences remain per-user.%n%nGame Optimizer keeps your games smoother and never closes them.%n%nClick Next to continue.
 brazilianportuguese.FinishedHeadingLabel=Concluiu a instalação do [name]
 brazilianportuguese.FinishedLabel=O [name] está instalado. Você pode abrir o programa agora ou depois pelo Menu Iniciar.
 english.FinishedHeadingLabel=Completing the [name] Setup Wizard
@@ -77,18 +98,18 @@ brazilianportuguese.StartupGroup=Inicialização:
 english.StartupGroup=Startup:
 brazilianportuguese.FeaturesTitle=O que será instalado
 english.FeaturesTitle=What will be installed
-brazilianportuguese.FeaturesSub=Game Optimizer na sua conta do Windows
-english.FeaturesSub=Game Optimizer for this Windows account
+brazilianportuguese.FeaturesSub=Game Optimizer no perfil Windows atual (autorização de administrador necessária)
+english.FeaturesSub=Game Optimizer for the current Windows profile (administrator authorization required)
 brazilianportuguese.FeaturesCaption=Resumo do que o assistente copia e configura:
 english.FeaturesCaption=Summary of what Setup copies and configures:
-brazilianportuguese.FeaturesBody=Pasta do programa (sua conta, sem admin)%nAtalho no Menu Iniciar%nAtalho na Área de Trabalho (opcional)%nInício com o Windows (opcional, recomendado)%n%nO otimizador detecta jogos abertos, ajusta prioridade e memória, e pode ir para a bandeja. Nenhum jogo é fechado.%n%nA limpeza da pasta Temp, se você usar depois no app, só atinge arquivos temporários do seu usuário.
-english.FeaturesBody=Program folder (this account, no admin)%nStart Menu shortcut%nDesktop shortcut (optional)%nStart with Windows (optional, recommended)%n%nThe optimizer detects running games, adjusts priority and memory, and can sit in the tray. Games are never closed.%n%nTemp cleanup, if you use it later in the app, only touches this user's temporary files.
+brazilianportuguese.FeaturesBody=Pasta do programa no perfil Windows atual (autorização de administrador necessária)%nAtalho no Menu Iniciar%nAtalho na Área de Trabalho (opcional)%nInício com o Windows (opcional)%n%nO otimizador detecta jogos abertos, ajusta prioridade e memória, e pode ir para a bandeja. Nenhum jogo é fechado.%n%nO Windows solicita autorização de administrador para abrir o programa, inclusive no início automático.
+english.FeaturesBody=Program folder in the current Windows profile (administrator authorization required)%nStart Menu shortcut%nDesktop shortcut (optional)%nStart with Windows (optional)%n%nThe optimizer detects running games, adjusts priority and memory, and can sit in the tray. Games are never closed.%n%nWindows requests administrator authorization to open the app, including at sign-in.
 brazilianportuguese.UpgradeWelcomeTitle=Bem-vindo ao assistente de atualização do Game Optimizer
 english.UpgradeWelcomeTitle=Welcome to the Game Optimizer update wizard
-brazilianportuguese.UpgradeWelcomeBody=Este assistente vai atualizar o Game Optimizer %1 para %2 nesta conta do Windows. Não precisa de administrador.%n%nA pasta, atalhos e início com o Windows são mantidos. Nenhum jogo é fechado.%n%nSe o programa estiver aberto, o instalador pede para encerrá-lo antes de copiar os arquivos.%n%nClique em Avançar para continuar.
-english.UpgradeWelcomeBody=This will update Game Optimizer %1 to %2 for this Windows account. Administrator rights are not required.%n%nYour folder, shortcuts, and start-with-Windows setting are kept. Games are never closed.%n%nIf the app is running, Setup will ask to close it before copying files.%n%nClick Next to continue.
-brazilianportuguese.UpgradeWelcomeBodyUnknown=Este assistente vai atualizar o Game Optimizer para %1 nesta conta do Windows. Não precisa de administrador.%n%nA pasta e os atalhos são mantidos. Clique em Avançar para continuar.
-english.UpgradeWelcomeBodyUnknown=This will update Game Optimizer to %1 for this Windows account. Administrator rights are not required.%n%nYour folder and shortcuts are kept. Click Next to continue.
+brazilianportuguese.UpgradeWelcomeBody=Este assistente vai atualizar o Game Optimizer %1 para %2 no perfil Windows atual. É necessária autorização de administrador; a instalação continua por usuário.%n%nA pasta, os atalhos e a opção de início com o Windows são mantidos. Nenhum jogo é fechado.%n%nSe o programa estiver aberto, o instalador pede para encerrá-lo antes de copiar os arquivos.%n%nClique em Avançar para continuar.
+english.UpgradeWelcomeBody=This updates Game Optimizer %1 to %2 for the current Windows profile. Administrator authorization is required; installation remains per-user.%n%nYour folder, shortcuts, and start-with-Windows setting are kept. Games are never closed.%n%nIf the app is running, Setup will ask to close it before copying files.%n%nClick Next to continue.
+brazilianportuguese.UpgradeWelcomeBodyUnknown=Este assistente vai atualizar o Game Optimizer para %1 no perfil Windows atual. É necessária autorização de administrador; a instalação continua por usuário.%n%nA pasta e os atalhos são mantidos. Clique em Avançar para continuar.
+english.UpgradeWelcomeBodyUnknown=This updates Game Optimizer to %1 for the current Windows profile. Administrator authorization is required; installation remains per-user.%n%nYour folder and shortcuts are kept. Click Next to continue.
 brazilianportuguese.UpgradeFinished=O Game Optimizer foi atualizado para {#AppVersion}. Você pode abrir o programa agora ou depois pelo Menu Iniciar.
 english.UpgradeFinished=Game Optimizer was updated to {#AppVersion}. You can launch it now or later from the Start Menu.
 brazilianportuguese.AppRunningPrompt=O Game Optimizer está aberto (pode estar só na bandeja, no canto da barra de tarefas).%n%nFechar a janela não encerra o programa — ele vai para a bandeja. O instalador precisa encerrá-lo para atualizar os arquivos.%n%nEncerrar o Game Optimizer agora?
@@ -107,30 +128,30 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "autostart"; Description: "{cm:StartWithWindows}"; GroupDescription: "{cm:StartupGroup}"; Flags: checkedonce
 
 [Files]
-Source: "..\target\release\game_optimizer.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "uninstall.ps1"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#PackageDir}\game_optimizer.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\wintun.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\install.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\uninstall.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [UninstallDelete]
 Type: files; Name: "{app}\.autostart-initialized"
 Type: files; Name: "{app}\.setup-wizard-complete"
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; WorkingDir: "{app}"; Comment: "{#AppName}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; WorkingDir: "{app}"; Comment: "{#AppName}"; Tasks: desktopicon
+Name: "{userprograms}\{#AppName}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; WorkingDir: "{app}"; Comment: "{#AppName}"
+Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; WorkingDir: "{app}"; Comment: "{#AppName}"; Tasks: desktopicon
 
 [Registry]
-; Start with Windows (HKCU Run). uninsdeletevalue removes it on uninstall.
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "GameOptimizer"; ValueData: """{app}\{#AppExeName}"" --gui"; Flags: uninsdeletevalue; Tasks: autostart
-; If the user unchecks autostart on upgrade, drop a leftover Run value.
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "GameOptimizer"; Flags: deletevalue; Tasks: not autostart
+; Clear the app-owned entry before CLI configuration and remove it on uninstall.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "GameOptimizer"; Flags: deletevalue uninsdeletevalue
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Parameters: "--gui"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent runascurrentuser
 
 [Code]
 const
-  SetupVersion = '0.6.0';
+  SetupVersion = '{#AppVersion}';
   SetupExeName = 'game_optimizer.exe';
 
 var
@@ -151,6 +172,11 @@ end;
 function GetInstalledVersion: String;
 begin
   Result := '';
+  // Elevated setup registration is machine-wide; older per-user installs used HKCU.
+  if RegQueryStringValue(HKLM, InnoUninstallKey, 'DisplayVersion', Result) then
+    Exit;
+  if RegQueryStringValue(HKLM, PsUninstallKey, 'DisplayVersion', Result) then
+    Exit;
   if RegQueryStringValue(HKCU, InnoUninstallKey, 'DisplayVersion', Result) then
     Exit;
   if RegQueryStringValue(HKCU, PsUninstallKey, 'DisplayVersion', Result) then
@@ -160,6 +186,12 @@ end;
 
 function PreviousInstallDir: String;
 begin
+  if RegQueryStringValue(HKLM, InnoUninstallKey, 'InstallLocation', Result) and
+     (Result <> '') then
+    Exit;
+  if RegQueryStringValue(HKLM, PsUninstallKey, 'InstallLocation', Result) and
+     (Result <> '') then
+    Exit;
   if RegQueryStringValue(HKCU, InnoUninstallKey, 'InstallLocation', Result) and
      (Result <> '') then
     Exit;
@@ -172,6 +204,8 @@ end;
 function IsUpgrade: Boolean;
 begin
   Result :=
+    RegKeyExists(HKLM, InnoUninstallKey) or
+    RegKeyExists(HKLM, PsUninstallKey) or
     RegKeyExists(HKCU, InnoUninstallKey) or
     RegKeyExists(HKCU, PsUninstallKey) or
     FileExists(AddBackslash(PreviousInstallDir) + SetupExeName);
@@ -358,6 +392,12 @@ begin
   begin
     FeaturesPage.Caption := CustomMessage('UpgradeFeaturesTitle');
     FeaturesPage.Description := CustomMessage('UpgradeFeaturesSub');
+    // Respect changes made in the app since the previous installation.
+    // The user can still change this selection in the setup wizard.
+    if RegValueExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'GameOptimizer') then
+      WizardSelectTasks('autostart')
+    else
+      WizardSelectTasks('!autostart');
   end;
   ApplyWelcomeUpgradeText;
 end;
@@ -377,14 +417,15 @@ begin
   RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'game_optimizer');
   RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'game_optimizer.exe');
   RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'GameOptimizer.exe');
-  RegDeleteValue(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Run', 'GameOptimizer');
-  RegDeleteValue(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Game Optimizer');
   DeleteFile(ExpandConstant('{userstartup}\Game Optimizer.lnk'));
   DeleteFile(ExpandConstant('{userstartup}\GameOptimizer.lnk'));
   DeleteFile(ExpandConstant('{userstartup}\game_optimizer.lnk'));
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+  AutoStartArg: String;
 begin
   if CurStep = ssInstall then
   begin
@@ -395,6 +436,18 @@ begin
   if CurStep = ssPostInstall then
   begin
     RemoveDuplicateAutostart;
+    if WizardIsTaskSelected('autostart') then
+      AutoStartArg := '--on'
+    else
+      AutoStartArg := '--off';
+    if not Exec(ExpandConstant('{app}\{#AppExeName}'), 'autostart ' + AutoStartArg,
+       ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+      ResultCode := -1;
+    if ResultCode <> 0 then
+    begin
+      MsgBox('Could not configure Start with Windows (autostart ' + AutoStartArg + ').', mbError, MB_OK);
+      Abort;
+    end;
     SaveStringToFile(ExpandConstant('{app}\.autostart-initialized'), '1', False);
     // Inno already ran the setup wizard; skip the in-app first-run wizard.
     SaveStringToFile(ExpandConstant('{app}\.setup-wizard-complete'), '1', False);

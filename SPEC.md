@@ -25,11 +25,11 @@ For each detected game identity, GPC builds a per-PID contract that:
 
 | Surface | Behavior |
 |---------|----------|
-| Default launch (no args) / `--gui` | Native GUI; close/minimize hides to tray |
+| Default launch (no args) / `--gui` | Administrator authorization required; native GUI; close/minimize hides to tray |
 | Tray | Click, double-click, or menu restores; maximized state is preserved; Quit exits |
-| Autostart | Enabled by default (installer + first GUI run); toggle in GUI |
+| Autostart | Enabled by default; per-user launcher requests normal UAC authorization at sign-in; toggle in GUI |
 | CLI subcommands | `scan`, `optimize`, `watch`, `games`, `autostart` |
-| Installer | Per-user `%LOCALAPPDATA%\GameOptimizer`; PowerShell + Inno Setup; Apps & features |
+| Installer | Administrator authorization required; per-user `%LOCALAPPDATA%\GameOptimizer`; PowerShell + Inno Setup; Apps & features |
 | Temp cleanup | Optional, confirmed GUI action on user Temp / INetCache only |
 
 ## Non-goals
@@ -50,7 +50,7 @@ For each detected game identity, GPC builds a per-PID contract that:
 5. GUI scan reports games and reclaim candidates without a noisy activity log.
 6. GUI is usable for non-technical users (PT-BR labels); minimize/close → tray;
    restore from tray returns visibility, focus, and maximized state when it was maximized.
-7. End-user installer does not require Rust; registers uninstall; Start with Windows
+7. End-user installer requires administrator authorization but installs per-user, does not require Rust, registers uninstall; Start with Windows
    is on by default (`-NoAutostart` to skip).
 8. Optional Temp cleanup only targets allowlisted user cache folders and refuses
    shader/OS-critical paths.

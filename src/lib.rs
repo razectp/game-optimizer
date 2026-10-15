@@ -15,9 +15,9 @@ pub mod gui;
 pub mod optimize;
 pub mod report;
 pub mod setup_wizard;
+pub mod tunnel;
 pub mod update;
 pub mod win_window;
-pub mod tunnel;
 
 #[cfg(windows)]
 pub mod win_process;
@@ -59,32 +59,23 @@ mod release_packaging {
     #[test]
     fn packaging_files_embed_crate_version() {
         let version = env!("CARGO_PKG_VERSION");
-        let files = [
-            (
-                "installer/install.ps1",
-                include_str!("../installer/install.ps1"),
-            ),
-            (
-                "installer/GameOptimizer.iss",
-                include_str!("../installer/GameOptimizer.iss"),
-            ),
-            (
-                "installer/package.ps1",
-                include_str!("../installer/package.ps1"),
-            ),
+        let versioned_files = [
             ("changelog.md", include_str!("../changelog.md")),
             ("README.md", include_str!("../README.md")),
-            (
-                "assets/app.manifest",
-                include_str!("../assets/app.manifest"),
-            ),
         ];
-        for (name, body) in files {
+        for (name, body) in versioned_files {
             assert!(
                 body.contains(version),
                 "{name} does not mention crate version {version}"
             );
         }
+        assert!(include_str!("../assets/app.manifest").contains(&format!("{version}.0")));
+        assert!(include_str!("../assets/app.manifest").contains("level=\"requireAdministrator\""));
+        assert!(include_str!("../installer/package.ps1").contains("Cargo.toml"));
+        assert!(include_str!("../installer/GameOptimizer.iss").contains("GetFileVersion"));
+        assert!(include_str!("../installer/GameOptimizer.iss")
+            .contains("SetupVersion = '{#AppVersion}'"));
+        assert!(include_str!("../installer/GameOptimizer.iss").contains("Len(AppVersionFull) - 2"));
     }
 
     #[test]
@@ -98,6 +89,27 @@ mod release_packaging {
         assert!(install.contains("Uninstall\\GameOptimizer"));
         assert!(install.contains("HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"));
         assert!(install.contains(".autostart-initialized"));
+        assert!(install.contains("Required wintun.dll"));
+        assert!(install.contains("wintun.dll"));
+    }
+
+    #[test]
+    fn packaged_payload_contains_required_wintun() {
+        let package = include_str!("../installer/package.ps1");
+        let iss = include_str!("../installer/GameOptimizer.iss");
+        let install = include_str!("../installer/install.ps1");
+        assert!(package.contains("wintun.dll"));
+        assert!(package.contains("refusing to create an incomplete package"));
+        assert!(iss.contains("Source: \"{#PackageDir}\\wintun.dll\"; DestDir: \"{app}\""));
+        assert!(iss.contains("Package payload missing required wintun.dll"));
+        assert!(package.contains("--locked --release --target-dir $BuildDir"));
+        assert!(package.contains("ZipFileExtensions]::CreateEntryFromFile"));
+        assert!(install.contains("Destination (Join-Path $InstallDir \"wintun.dll\")"));
+        let uninstall = include_str!("../installer/uninstall.ps1");
+        assert!(uninstall.contains("config.toml"));
+        assert!(uninstall.contains("wintun.dll"));
+        assert!(uninstall.contains("[System.IO.Directory]::Delete($InstallDir, $false)"));
+        assert!(!uninstall.contains("Remove-ItemIfExists -Path $InstallDir -Recurse"));
     }
 
     #[test]
@@ -114,11 +126,42 @@ mod release_packaging {
     }
 
     #[test]
-    fn autostart_stays_on_current_user_run_key() {
-        let autostart = include_str!("autostart.rs");
-        assert!(autostart.contains("WindowsEnableMode::CurrentUser"));
-        assert!(autostart.contains("remove_duplicate_entries"));
-        assert!(autostart.contains("HKLM"));
+    fn installer_requires_admin_but_runs_gui_as_current_user() {
+        let iss = include_str!("../installer/GameOptimizer.iss");
+        assert!(iss.contains("PrivilegesRequired=admin"));
+        assert!(!iss.contains("PrivilegesRequired=lowest"));
+        assert!(iss.contains("postinstall skipifsilent runascurrentuser"));
+        assert!(!iss.contains("asInvoker"));
+        assert!(iss.contains("autostart ' + AutoStartArg"));
+        assert!(iss.contains("WizardIsTaskSelected('autostart')"));
+        let install = include_str!("../installer/install.ps1");
+        let uninstall = include_str!("../installer/uninstall.ps1");
+        assert!(install.contains("#Requires -RunAsAdministrator"));
+        assert!(uninstall.contains("#Requires -RunAsAdministrator"));
+        assert!(install.contains("@(\"autostart\", $mode)"));
+        assert!(install.contains("$process.ExitCode -ne 0"));
+        let main = include_str!("main.rs");
+        assert!(main.contains("Commands::Autostart { on, off }"));
+        assert!(main.contains("autostart::set_enabled(on)"));
+        assert!(iss.contains("if ResultCode <> 0"));
+        assert!(iss.contains("Flags: deletevalue uninsdeletevalue"));
+        assert!(!iss.contains("ValueData: \"\"\"{app}\\{#AppExeName}\"\" --gui\""));
+        assert!(!iss.contains("Root: HKLM;"));
+        assert!(!uninstall.contains("HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"));
+    }
+
+    #[test]
+    fn admin_installer_docs_explain_per_user_profile() {
+        let iss = include_str!("../installer/GameOptimizer.iss");
+        for key in ["WelcomeLabel2", "FeaturesBody", "UpgradeWelcomeBody"] {
+            assert!(iss.contains(key));
+        }
+        assert!(
+            include_str!("../installer/welcome-pt.txt").contains("autorização de administrador")
+        );
+        assert!(include_str!("../installer/welcome-en.txt").contains("Administrator authorization"));
+        assert!(include_str!("../.github/workflows/release.yml")
+            .contains("autorização de administrador"));
     }
 
     #[test]
@@ -127,6 +170,7 @@ mod release_packaging {
         assert!(iss.contains("RemoveDuplicateAutostart"));
         assert!(iss.contains("ssPostInstall"));
         assert!(iss.contains("Game Optimizer.lnk"));
+        assert!(iss.contains("WizardSelectTasks('!autostart')"));
     }
 
     #[test]

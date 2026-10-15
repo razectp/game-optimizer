@@ -10,19 +10,39 @@ env:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Install GUI build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libxdo-dev pkg-config
       - name: Format
-        run: cargo fmt --check
+        run: cargo fmt --check --all
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Tests
-        run: cargo test
+        run: cargo test --locked
+      - name: Build and verify distribution payload
+        shell: pwsh
+        run: |
+          & .\installer\package.ps1
+          if ($LASTEXITCODE -ne 0) { throw "package.ps1 failed with exit code $LASTEXITCODE" }
+          $expected = @('game_optimizer.exe', 'wintun.dll', 'install.ps1', 'uninstall.ps1', 'icon.ico') | Sort-Object
+          $stage = Get-ChildItem 'dist\GameOptimizer' -File | Select-Object -ExpandProperty Name | Sort-Object
+          if (Compare-Object $expected $stage) { throw "Staging contents do not match the allowlist: $($stage -join ', ')" }
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          $zipPath = "dist\GameOptimizer-$version-windows.zip"
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zipPath))
+          try {
+            $entries = @($zip.Entries | ForEach-Object FullName | Sort-Object)
+            $expectedEntries = @($expected | ForEach-Object { "GameOptimizer/$_" }) | Sort-Object
+            if (Compare-Object $expectedEntries $entries) { throw "ZIP contents do not match allowlist: $($entries -join ', ')" }
+            $entry = $zip.GetEntry('GameOptimizer/wintun.dll')
+            $stream = $entry.Open()
+            try {
+              $sha = [System.Security.Cryptography.SHA256]::Create()
+              try { $zipHash = [Convert]::ToHexString($sha.ComputeHash($stream)) } finally { $sha.Dispose() }
+            } finally { $stream.Dispose() }
+            $stageHash = (Get-FileHash 'dist\GameOptimizer\wintun.dll' -Algorithm SHA256).Hash
+            if ($zipHash -ne $stageHash) { throw 'ZIP wintun.dll SHA-256 does not match staged DLL.' }
+          } finally { $zip.Dispose() }

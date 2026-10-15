@@ -7,6 +7,19 @@ use crate::tunnel::routes::RouteManager;
 use crate::tunnel::sockets::{find_game_remote_ips, ProcessConnection};
 use crate::tunnel::wireguard::WireGuardConfig;
 
+fn snapshot_connections(
+    connections: impl IntoIterator<Item = ProcessConnection>,
+) -> HashMap<u32, Vec<ProcessConnection>> {
+    let mut snapshot = HashMap::new();
+    for connection in connections {
+        let entries: &mut Vec<ProcessConnection> = snapshot.entry(connection.pid).or_default();
+        if !entries.contains(&connection) {
+            entries.push(connection);
+        }
+    }
+    snapshot
+}
+
 /// Connection health of the WireGuard tunnel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunnelHealth {
@@ -83,7 +96,6 @@ impl TunnelManager {
         let mut route_mgr = RouteManager::new();
         if let Ok(gw) = config.tunnel_gateway.trim().parse::<Ipv4Addr>() {
             route_mgr.set_gateway(gw);
-            crate::tunnel::routes::cleanup_stale_gateway_routes(gw);
         }
 
         Self {
@@ -102,13 +114,27 @@ impl TunnelManager {
 
     /// Update configuration (e.g. edited from GUI).
     pub fn update_config(&mut self, config: WireGuardConfig) {
-        if let Ok(gw) = config.tunnel_gateway.trim().parse::<Ipv4Addr>() {
-            self.route_mgr.set_gateway(gw);
+        if self.config == config {
+            return;
         }
+        // Remove routes while the adapter still exists. Closing Wintun first
+        // may let Windows remove them before our ownership tracking is updated.
+        self.route_mgr.cleanup_all();
         if let Some(engine) = self.embedded_engine.take() {
             engine.stop();
         }
+        self.route_mgr.set_if_index(None);
+        // Existing routes retain their original identity for safe cleanup.
+        // New routes must always use the newly configured gateway.
+        if let Ok(gw) = config.tunnel_gateway.trim().parse::<Ipv4Addr>() {
+            self.route_mgr.set_gateway(gw);
+        }
         self.health = TunnelHealth::Idle;
+        self.initial_migration_done = false;
+        self.last_known_pids.clear();
+        self.active_connections.clear();
+        self.discovered_subnets.clear();
+        self.status_text = "Configuração do túnel atualizada.".into();
         self.config = config;
     }
 
@@ -132,16 +158,19 @@ impl TunnelManager {
         let mut report = TunnelPassReport::default();
 
         if !self.is_enabled() {
-            if let Some(engine) = self.embedded_engine.take() {
-                engine.stop();
-            }
-            if !self.last_known_pids.is_empty() {
+            if !self.last_known_pids.is_empty() || !self.route_mgr.is_empty() {
                 let removed = self.route_mgr.cleanup_all();
                 report.removed_routes.extend(removed);
                 self.last_known_pids.clear();
                 self.active_connections.clear();
+                self.discovered_subnets.clear();
+            }
+            if let Some(engine) = self.embedded_engine.take() {
+                engine.stop();
+                self.route_mgr.set_if_index(None);
             }
             self.health = TunnelHealth::Idle;
+            self.discovered_subnets.clear();
             self.status_text = "Túnel desativado.".into();
             return report;
         }
@@ -149,17 +178,19 @@ impl TunnelManager {
         let current_set: HashSet<u32> = current_pids.iter().copied().collect();
 
         if current_set.is_empty() {
-            if let Some(engine) = self.embedded_engine.take() {
-                engine.stop();
-                self.route_mgr.set_if_index(None);
-            }
-            if !self.last_known_pids.is_empty() {
+            if !self.last_known_pids.is_empty() || !self.route_mgr.is_empty() {
                 let removed = self.route_mgr.cleanup_all();
                 report.removed_routes.extend(removed);
                 self.last_known_pids.clear();
                 self.active_connections.clear();
+                self.discovered_subnets.clear();
+            }
+            if let Some(engine) = self.embedded_engine.take() {
+                engine.stop();
+                self.route_mgr.set_if_index(None);
             }
             self.initial_migration_done = false;
+            self.discovered_subnets.clear();
             self.health = TunnelHealth::Idle;
             self.status_text = "Túnel em repouso (aguardando jogo).".into();
             return report;
@@ -243,11 +274,16 @@ impl TunnelManager {
 
         // 5. If and ONLY IF the tunnel is verified Healthy, route game connections through the tunnel!
         if self.health == TunnelHealth::Healthy {
+            let mut routed_snapshot = Vec::new();
             // Pre-route all previously discovered game subnets (/24) so that newly opening
             // game sockets (like port 31000 world loading) ALREADY match the tunnel route from their very first SYN packet!
             for &subnet in &self.discovered_subnets {
                 for &pid in &current_set {
-                    let _ = self.route_mgr.add_subnet_route(pid, subnet, Ipv4Addr::new(255, 255, 255, 0));
+                    let _ = self.route_mgr.add_subnet_route(
+                        pid,
+                        subnet,
+                        Ipv4Addr::new(255, 255, 255, 0),
+                    );
                 }
             }
 
@@ -264,7 +300,9 @@ impl TunnelManager {
                 // Remember this game server's /24 cluster subnet
                 let octets = conn.remote_ip.octets();
                 let subnet = Ipv4Addr::new(octets[0], octets[1], octets[2], 0);
-                self.discovered_subnets.insert(subnet);
+                if self.discovered_subnets.len() < 256 {
+                    self.discovered_subnets.insert(subnet);
+                }
 
                 match self.route_mgr.add_game_route(conn.pid, conn.remote_ip) {
                     Ok(newly_added) => {
@@ -278,13 +316,13 @@ impl TunnelManager {
                                 && conn.protocol == "TCP"
                                 && crate::tunnel::sockets::is_game_port(conn.remote_port)
                             {
-                                crate::tunnel::sockets::reset_tcp_connection(conn.pid, conn.remote_ip);
+                                crate::tunnel::sockets::reset_tcp_connection(
+                                    conn.pid,
+                                    conn.remote_ip,
+                                );
                             }
                         }
-                        self.active_connections
-                            .entry(conn.pid)
-                            .or_default()
-                            .push(conn);
+                        routed_snapshot.push(conn);
                     }
                     Err(err) => {
                         self.status_text = format!("Aviso de rota: {err}");
@@ -305,6 +343,7 @@ impl TunnelManager {
                 }
             }
             self.status_text = "Túnel WireGuard conectado e ativo.".into();
+            self.active_connections = snapshot_connections(routed_snapshot);
         }
 
         self.last_known_pids = current_set;
@@ -341,17 +380,15 @@ impl TunnelManager {
 
     /// Tear down all active routes cleanly.
     pub fn shutdown(&mut self) {
+        self.route_mgr.cleanup_all();
         if let Some(engine) = self.embedded_engine.take() {
             engine.stop();
-        }
-        self.route_mgr.cleanup_all();
-        if let Ok(gw) = self.config.tunnel_gateway.trim().parse::<Ipv4Addr>() {
-            crate::tunnel::routes::cleanup_stale_gateway_routes(gw);
         }
         self.health = TunnelHealth::Idle;
         self.initial_migration_done = false;
         self.last_known_pids.clear();
         self.active_connections.clear();
+        self.discovered_subnets.clear();
     }
 }
 
@@ -379,11 +416,13 @@ mod tests {
 
     #[test]
     fn degraded_tunnel_transitions_to_degraded_when_tunnel_cannot_start() {
-        let mut cfg = WireGuardConfig::default();
-        cfg.enabled = true;
-        cfg.endpoint = "192.0.2.1:51820".into();
-        cfg.private_key = "aGVsbG93b3JsZGFzZGFzZGFzZGFzZGFzZGFzZGFzZGE=".into();
-        cfg.peer_public_key = "d29ybGRoZWxsb2FzZGFzZGFzZGFzZGFzZGFzZGFzZGE=".into();
+        let cfg = WireGuardConfig {
+            enabled: true,
+            endpoint: "192.0.2.1:51820".into(),
+            private_key: "invalid".into(),
+            peer_public_key: "invalid".into(),
+            ..WireGuardConfig::default()
+        };
         let mut mgr = TunnelManager::new(cfg);
 
         // When starting tunnel fails (no wintun.dll in test / unprivileged), health becomes Degraded
@@ -391,5 +430,31 @@ mod tests {
         assert_eq!(mgr.status().health, TunnelHealth::Degraded);
         assert!(!report.recovered);
     }
-}
 
+    #[test]
+    fn constructor_and_equal_config_update_are_pure_noops() {
+        let mut mgr = TunnelManager::new(WireGuardConfig::default());
+        mgr.status_text = "preserved".into();
+        mgr.update_config(WireGuardConfig::default());
+        assert_eq!(mgr.status_text, "preserved");
+        assert!(mgr.route_mgr.is_empty());
+    }
+
+    #[test]
+    fn connection_snapshot_is_deduplicated_and_replaces_old_entries() {
+        let connection = ProcessConnection {
+            local_port: 40000,
+            pid: 1,
+            remote_ip: Ipv4Addr::new(192, 0, 2, 1),
+            remote_port: 80,
+            protocol: "TCP",
+        };
+        let mut cache = HashMap::new();
+        for _ in 0..1000 {
+            cache = snapshot_connections([connection.clone(), connection.clone()]);
+        }
+        assert_eq!(cache.get(&1).unwrap().len(), 1);
+        cache = snapshot_connections(std::iter::empty());
+        assert!(cache.is_empty());
+    }
+}

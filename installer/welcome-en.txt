@@ -3,8 +3,10 @@ Game Optimizer — setup wizard
 This app keeps running games smoother: high priority, protected memory,
 and optional RAM reclaim from large apps such as Chrome.
 
-Games are never closed. No administrator rights are required. Files are
-installed only for this Windows account (%LOCALAPPDATA%\GameOptimizer).
+Games are never closed. Administrator authorization is required to install.
+Files and preferences remain in the current Windows profile
+(%LOCALAPPDATA%\GameOptimizer). If credentials for another account are used,
+per-user data may belong to that account.
 
 Next you can choose the folder, a desktop shortcut, and whether the app
 should start with Windows.

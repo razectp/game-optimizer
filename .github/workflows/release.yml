@@ -16,16 +16,19 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Verify Windows sources
+        shell: pwsh
+        run: |
+          cargo fmt --check --all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build portable zip
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\installer\package.ps1
-
-      - name: Copy standalone exe
-        shell: pwsh
-        run: |
-          $ver = "0.5.3"
-          Copy-Item -LiteralPath "dist\GameOptimizer\game_optimizer.exe" `
-            -Destination "dist\GameOptimizer-$ver.exe" -Force
 
       - name: Install Inno Setup
         shell: pwsh
@@ -34,10 +37,11 @@ jobs:
       - name: Build setup installer
         shell: pwsh
         run: |
-          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path -LiteralPath $iscc)) {
-            throw "ISCC.exe not found at $iscc"
+          $candidates = foreach ($root in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+            foreach ($version in @(7, 6)) { Join-Path $root "Inno Setup $version\ISCC.exe" }
           }
+          $iscc = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc) { throw 'ISCC.exe not found after installing Inno Setup.' }
           & $iscc ".\installer\GameOptimizer.iss"
           if ($LASTEXITCODE -ne 0) {
             throw "iscc failed with exit code $LASTEXITCODE"
@@ -46,28 +50,23 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Game Optimizer 0.5.3
+          name: Game Optimizer ${{ github.ref_name }}
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
           files: |
-            dist/GameOptimizer-0.5.3-setup.exe
-            dist/GameOptimizer-0.5.3.exe
-            dist/GameOptimizer-0.5.3-windows.zip
+            dist/GameOptimizer-*-setup.exe
+            dist/GameOptimizer-*-windows.zip
           body: |
-            Instalador e binário Windows de 64 bits (Windows 10/11).
+            Instalador e pacote portátil Windows de 64 bits (Windows 10/11).
 
-            **Recomendado:** `GameOptimizer-0.5.3-setup.exe` (assistente Inno Setup, por usuário, sem admin).
+            **Recomendado:** o arquivo `GameOptimizer-<versão>-setup.exe` (assistente Inno Setup; requer autorização de administrador, mas instala no perfil Windows atual).
             Passos: idioma, boas-vindas, o que será instalado, licença, pasta, atalhos/início com o Windows.
 
-            Instala em `%LOCALAPPDATA%\GameOptimizer`, atalhos, início com o Windows e desinstalação em Aplicativos e recursos.
+            Instala em `%LOCALAPPDATA%\GameOptimizer`, atalhos, início com o Windows e desinstalação em Aplicativos e recursos. Se forem fornecidas credenciais de outra conta, os dados por usuário podem pertencer a essa conta.
             Se já houver instalação, o assistente mostra atualização e pede para encerrar o app (a janela sozinha só vai para a bandeja).
 
-            Corrige o erro `Type Mismatch` do setup 0.5.2 ao atualizar.
-
-            **Portátil:** `GameOptimizer-0.5.3.exe` ou o zip com `install.ps1` (o app abre um assistente no primeiro uso).
-
-            Janela com rolagem (sem precisar esticar), um único início com o Windows, e aviso de atualização no próprio app.
+            **Portátil:** use o ZIP, que inclui `wintun.dll` necessário ao túnel.
 
             ```powershell
             powershell -ExecutionPolicy Bypass -File .\install.ps1
