@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.5 — 2026-10-28
+
+- **Automação de Hotkeys & Macros Autônomas por Janela (Multi-client/Multi-instância)**:
+  - Sistema de automação de teclas operando de forma autônoma e concorrente por processo (PID) e janela (`HWND`), perfeito para múltiplos clientes abertos do mesmo jogo sem interferência cruzada.
+  - **Modos de Execução**: Suporte aos modos **Independente** (disparo contínuo por intervalos próprios de cada tecla) e **Sequencial** (execução combo passo a passo 1-a-1 com intervalo configurável de ciclo entre rodadas completas).
+  - **Atalho de Alternância Rápida (Toggle Hotkey)**: Atalho configurável por jogo (padrão `F8`), com detecção global não-bloqueante via `GetAsyncKeyState` que atua exclusivamente sobre a janela do jogo que estiver em foco naquele instante.
+  - **Envio Direto em Background**: Disparo de mensagens de baixo nível da API Win32 (`PostMessageW` com `WM_KEYDOWN` e `WM_KEYUP`, scancodes e lparam precisos), permitindo automação contínua mesmo quando a janela estiver em segundo plano.
+  - **Detecção Inteligente de Janelas de Jogo**: Enumeração dinâmica de janelas filhas e seleção da janela ativa com dimensões reais de renderização, evitando bloqueios ou envio de teclas para launchers e telas de splash invisíveis.
+  - **Persistência Atômica & Interface Gráfica**: Perfis de macros salvos em `config.toml` sob `[macros.<game>]`, com controles reativos na GUI para adicionar/remover regras, ajustar tempos de pressionamento/espera, testar teclas individualmente e acompanhar status em tempo real por PID.
+
 ## 0.6.4 — 2026-10-14
 
 - Installer and PowerShell install/uninstall require administrator authorization while keeping files and preferences in the current Windows profile; Start-with-Windows is configured through the app CLI.

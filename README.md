@@ -19,13 +19,13 @@ if the window was maximized. Start with Windows is enabled by default.
 No Rust toolchain is required. Download a packaged build from
 [GitHub Releases](https://github.com/razectp/game-optimizer/releases):
 
-1. **Setup (recommended):** run `GameOptimizer-0.6.4-setup.exe`, approve the
+1. **Setup (recommended):** run `GameOptimizer-0.6.5-setup.exe`, approve the
    Windows administrator prompt, and follow the setup wizard (language, welcome,
    license, folder, shortcuts). The app and preferences remain in the current
    user's `%LOCALAPPDATA%`. If you enter credentials for a different Windows
    account, per-user settings and shortcuts may apply to that account instead. Over an
    existing install it shows an update page and asks to close the running app.
-2. **Portable:** extract `GameOptimizer-0.6.4-windows.zip` and install:
+2. **Portable:** extract `GameOptimizer-0.6.5-windows.zip` and install:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1

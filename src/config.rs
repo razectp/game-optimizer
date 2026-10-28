@@ -1,6 +1,6 @@
 //! Configuration and game allowlist loading.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+use crate::macros::GameMacroProfile;
 use crate::tunnel::WireGuardConfig;
 
 /// Runtime settings and game name allowlist.
@@ -43,6 +44,8 @@ pub struct AppConfig {
     pub max_trim_candidates: usize,
     /// Embedded WireGuard VPS tunneling configuration.
     pub wireguard: WireGuardConfig,
+    /// Per-game autonomous hotkey / macro profiles keyed by normalized process name.
+    pub macros: BTreeMap<String, GameMacroProfile>,
     /// Optional path the config was loaded from.
     pub source_path: Option<PathBuf>,
 }
@@ -103,6 +106,7 @@ impl Default for AppConfig {
             memory_trim_threshold_bytes: 200 * 1024 * 1024,
             max_trim_candidates: 12,
             wireguard: WireGuardConfig::default(),
+            macros: BTreeMap::new(),
             source_path: None,
         }
     }
@@ -203,6 +207,7 @@ impl AppConfig {
             },
             wireguard: Some(self.wireguard.clone()),
             gui: Some(self.gui.clone().normalized()),
+            macros: self.macros.clone(),
         };
         let raw = toml::to_string_pretty(&file)?;
         atomic_write(path, raw.as_bytes())
@@ -289,6 +294,13 @@ impl AppConfig {
             reclaim.insert(normalize_process_name(&name));
         }
         let threshold_mb = file.settings.memory_trim_threshold_mb.unwrap_or(200);
+        let mut macros = BTreeMap::new();
+        for (k, v) in file.macros {
+            let key = normalize_process_name(&k);
+            if !key.is_empty() {
+                macros.insert(key, v.normalized());
+            }
+        }
         Self {
             gui: file.gui.unwrap_or_default().normalized(),
             game_names: names,
@@ -305,6 +317,7 @@ impl AppConfig {
             memory_trim_threshold_bytes: threshold_mb.saturating_mul(1024 * 1024),
             max_trim_candidates: file.settings.max_trim_candidates.unwrap_or(12),
             wireguard: file.wireguard.unwrap_or_default(),
+            macros,
             source_path,
         }
     }
@@ -493,6 +506,9 @@ pub struct ConfigFile {
     /// GUI preferences.
     #[serde(default)]
     pub gui: Option<GuiPreferences>,
+    /// Per-game macro / hotkey profiles.
+    #[serde(default)]
+    pub macros: BTreeMap<String, GameMacroProfile>,
 }
 
 /// `[games]` table.
@@ -599,6 +615,7 @@ mod tests {
             settings: SettingsSection::default(),
             wireguard: None,
             gui: None,
+            ..ConfigFile::default()
         };
         let cfg = AppConfig::from_file(file, None);
         assert!(cfg.game_names.contains("mygame"));
@@ -619,6 +636,7 @@ mod tests {
             },
             wireguard: None,
             gui: None,
+            ..ConfigFile::default()
         };
         let cfg = AppConfig::from_file(file, None);
         assert!(cfg.reclaim_names.contains("mybrowser"));
@@ -784,6 +802,38 @@ mod tests {
         let path = dir.join("config.toml");
         AppConfig::default().save_to_path(&path).unwrap();
         assert!(path.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn macro_profiles_round_trip_through_toml() {
+        let dir = sandbox();
+        let path = dir.join("config.toml");
+        let mut cfg = AppConfig::default();
+        cfg.macros.insert(
+            "mir4g".to_string(),
+            crate::macros::GameMacroProfile {
+                auto_start: true,
+                mode: crate::macros::MacroExecutionMode::Sequential,
+                cycle_interval_ms: 5000,
+                toggle_key: "F8".into(),
+                rules: vec![crate::macros::MacroRule {
+                    label: "Skill 1".into(),
+                    key: "f1".into(),
+                    interval_ms: 50,
+                    hold_ms: 15,
+                    enabled: true,
+                }],
+            },
+        );
+        cfg.save_to_path(&path).unwrap();
+        let loaded = AppConfig::load_or_default(&path).unwrap();
+        let prof = loaded.macros.get("mir4g").expect("mir4g macro profile");
+        assert!(prof.auto_start);
+        assert_eq!(prof.cycle_interval_ms, 5000);
+        assert_eq!(prof.rules.len(), 1);
+        assert_eq!(prof.rules[0].key, "F1");
+        assert_eq!(prof.rules[0].interval_ms, 50);
         fs::remove_dir_all(dir).unwrap();
     }
 }

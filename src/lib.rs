@@ -12,6 +12,7 @@ pub mod config;
 pub mod contract;
 pub mod detect;
 pub mod gui;
+pub mod macros;
 pub mod optimize;
 pub mod report;
 pub mod setup_wizard;

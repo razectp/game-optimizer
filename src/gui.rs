@@ -19,6 +19,11 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use crate::autostart;
 use crate::config::AppConfig;
 use crate::detect::RunningProcessInfo;
+use crate::macros::{
+    key_display_label, GameMacroProfile, MacroExecutionMode, MacroInstanceStatus, MacroManager,
+    MacroRule, DEFAULT_CYCLE_INTERVAL_MS, DEFAULT_MACRO_HOLD_MS, DEFAULT_MACRO_INTERVAL_MS,
+    MAX_MACRO_INTERVAL_MS, MIN_MACRO_INTERVAL_MS, SUPPORTED_KEYS,
+};
 use crate::optimize::{optimize_system, OptimizeReport, OptimizeRequest};
 use crate::report::format_mib;
 use crate::tunnel::{TunnelHealth, TunnelStatus, WireGuardConfig};
@@ -48,6 +53,8 @@ const SCROLL_AREA_IDS: &[&str] = &[
     "builtin-games-scroll",
     "reclaim-rules-scroll",
     "protected-rules-scroll",
+    "macro-modal-scroll",
+    "macro-rules-scroll",
 ];
 
 fn debounce_elapsed(changed_at: Instant, now: Instant, delay: Duration) -> bool {
@@ -79,6 +86,7 @@ enum WorkerMsg {
     Log(String),
     Watching(bool),
     Tunnel(TunnelStatus),
+    Macros(Vec<MacroInstanceStatus>),
     Processes(Vec<RunningProcessInfo>),
     Stopped,
 }
@@ -91,15 +99,38 @@ enum ProcessTab {
 }
 
 enum UiCmd {
-    Optimize { trim_game: bool },
+    Optimize {
+        trim_game: bool,
+    },
     Scan,
     RefreshProcesses(Box<AppConfig>),
-    StartWatch { interval: u64, trim_game: bool },
+    StartWatch {
+        interval: u64,
+        trim_game: bool,
+    },
     StopWatch,
     UpdateConfig(Box<AppConfig>),
     ReplaceConfig(Box<AppConfig>),
     CommitConfig(Box<AppConfig>),
     TestVpsPing,
+    SetMacroActive {
+        pid: u32,
+        normalized_name: String,
+        active: bool,
+    },
+    SetMacroRules {
+        pid: u32,
+        normalized_name: String,
+        mode: MacroExecutionMode,
+        cycle_interval_ms: u64,
+        toggle_key: String,
+        rules: Vec<MacroRule>,
+    },
+    TestMacroKey {
+        pid: u32,
+        normalized_name: String,
+        key: String,
+    },
     Shutdown,
 }
 
@@ -281,6 +312,14 @@ struct GuiApp {
     new_never_trim_input: String,
     show_paste_conf: bool,
     paste_conf_text: String,
+    macro_statuses: Vec<MacroInstanceStatus>,
+    show_macro_modal: bool,
+    macro_target_pid: Option<u32>,
+    macro_target_name: String,
+    macro_target_normalized: String,
+    capturing_macro_key_for: Option<Option<usize>>,
+    recording_macro_sequence: bool,
+    default_macro_delay_ms: u64,
     /// Must stay owned so the tray icon is not destroyed.
     #[allow(dead_code)]
     tray: Option<TrayIcon>,
@@ -373,6 +412,14 @@ impl GuiApp {
             new_never_trim_input: String::new(),
             show_paste_conf: false,
             paste_conf_text: String::new(),
+            macro_statuses: Vec::new(),
+            show_macro_modal: false,
+            macro_target_pid: None,
+            macro_target_name: String::new(),
+            macro_target_normalized: String::new(),
+            capturing_macro_key_for: None,
+            recording_macro_sequence: false,
+            default_macro_delay_ms: DEFAULT_MACRO_INTERVAL_MS,
             tray,
             tray_show,
             tray_optimize,
@@ -594,6 +641,9 @@ impl GuiApp {
                 WorkerMsg::Tunnel(status) => {
                     self.tunnel_status = Some(status);
                 }
+                WorkerMsg::Macros(statuses) => {
+                    self.macro_statuses = statuses;
+                }
                 WorkerMsg::Processes(processes) => self.running_processes = processes,
                 WorkerMsg::Stopped => self.worker_stopped = true,
             }
@@ -717,7 +767,12 @@ impl App for GuiApp {
             }
         }
 
-        ctx.request_repaint_after(Duration::from_millis(500));
+        let repaint_ms = if self.show_macro_modal && self.macro_statuses.iter().any(|s| s.active) {
+            80
+        } else {
+            500
+        };
+        ctx.request_repaint_after(Duration::from_millis(repaint_ms));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut Frame) {
@@ -741,6 +796,9 @@ impl App for GuiApp {
         }
         if self.show_process_modal {
             self.draw_process_modal(&ctx);
+        }
+        if self.show_macro_modal {
+            self.draw_macro_modal(&ctx);
         }
     }
 }
@@ -1322,15 +1380,74 @@ impl GuiApp {
             ui.add_space(4.0);
 
             for game in &games {
+                let inst_status = self
+                    .macro_statuses
+                    .iter()
+                    .find(|s| s.pid == game.pid)
+                    .cloned();
+                let profile = self
+                    .app_config
+                    .macros
+                    .get(&game.normalized_name)
+                    .cloned()
+                    .unwrap_or_default();
+                let rules_count = inst_status
+                    .as_ref()
+                    .map(|s| s.rules.len())
+                    .unwrap_or(profile.rules.len());
+                let enabled_rules_count = inst_status
+                    .as_ref()
+                    .map(|s| s.rules.iter().filter(|r| r.enabled).count())
+                    .unwrap_or_else(|| profile.enabled_rules_count());
+                let is_macro_active = inst_status.as_ref().is_some_and(|s| s.active);
+                let total_sent = inst_status.as_ref().map(|s| s.total_triggers).unwrap_or(0);
+                let win_title = inst_status.as_ref().and_then(|s| s.window_title.clone());
+
+                let card_stroke = if is_macro_active {
+                    Stroke::new(1.2, OK.gamma_multiply(0.65))
+                } else {
+                    Stroke::new(1.0, STROKE)
+                };
+
                 egui::Frame::new()
                     .fill(BG_ROW)
-                    .stroke(Stroke::new(1.0, STROKE))
+                    .stroke(card_stroke)
                     .corner_radius(8.0)
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("🎮").size(16.0));
-                            ui.label(RichText::new(&game.name).color(TEXT).strong().size(15.0));
+                            let title_btn = ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(&game.name)
+                                            .color(TEXT)
+                                            .strong()
+                                            .size(15.0),
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(
+                                    "Clique para abrir a configuração de Hotkeys / Macros autônomas desta janela",
+                                );
+                            if title_btn.clicked() {
+                                self.open_macro_modal_for_game(
+                                    game.pid,
+                                    &game.name,
+                                    &game.normalized_name,
+                                );
+                            }
+
+                            if let Some(title) = &win_title {
+                                if !title.eq_ignore_ascii_case(&game.name) {
+                                    ui.label(
+                                        RichText::new(format!("({title})"))
+                                            .color(MUTED)
+                                            .size(11.5),
+                                    );
+                                }
+                            }
 
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -1346,7 +1463,7 @@ impl GuiApp {
                         });
 
                         ui.add_space(4.0);
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label(
                                 RichText::new(format!("PID {}", game.pid))
                                     .color(MUTED)
@@ -1382,6 +1499,106 @@ impl GuiApp {
                                         );
                                     }
                                     TunnelHealth::Idle => {}
+                                }
+                            }
+
+                            if is_macro_active {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "• ⚡ {enabled_rules_count} Hotkey(s) ativa(s) ({total_sent} envios)"
+                                    ))
+                                    .color(OK)
+                                    .size(11.0)
+                                    .strong(),
+                                );
+                            } else if rules_count > 0 {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "• ⌨️ {rules_count} Hotkey(s) configurada(s) (Pausado)"
+                                    ))
+                                    .color(MUTED)
+                                    .size(11.0),
+                                );
+                            }
+                        });
+
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            let cfg_label = if rules_count > 0 {
+                                format!("⌨️ Hotkeys / Macros ({rules_count})")
+                            } else {
+                                "⌨️ Configurar Hotkeys (Opcional)".to_string()
+                            };
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(cfg_label)
+                                            .color(TEXT)
+                                            .size(11.5)
+                                            .strong(),
+                                    )
+                                    .fill(BG_RAISED)
+                                    .stroke(Stroke::new(1.0, STROKE))
+                                    .corner_radius(6.0),
+                                )
+                                .on_hover_text(
+                                    "Configurar envio autônomo de teclas e cliques para esta janela do jogo",
+                                )
+                                .clicked()
+                            {
+                                self.open_macro_modal_for_game(
+                                    game.pid,
+                                    &game.name,
+                                    &game.normalized_name,
+                                );
+                            }
+
+                            if rules_count > 0 {
+                                if is_macro_active {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("⏸️ Pausar Janela")
+                                                    .color(Color32::from_rgb(254, 202, 202))
+                                                    .size(11.5)
+                                                    .strong(),
+                                            )
+                                            .fill(Color32::from_rgb(88, 28, 28))
+                                            .corner_radius(6.0),
+                                        )
+                                        .on_hover_text(
+                                            "Pausar o envio autônomo de hotkeys apenas para esta janela",
+                                        )
+                                        .clicked()
+                                    {
+                                        self.set_game_macro_active(
+                                            game.pid,
+                                            &game.normalized_name,
+                                            false,
+                                        );
+                                    }
+                                } else if enabled_rules_count > 0
+                                    && ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("▶️ Iniciar nesta Janela")
+                                                    .color(Color32::from_rgb(18, 14, 8))
+                                                    .size(11.5)
+                                                    .strong(),
+                                            )
+                                            .fill(ACCENT)
+                                            .corner_radius(6.0),
+                                        )
+                                        .on_hover_text(
+                                            "Iniciar o envio autônomo de hotkeys para esta janela do jogo",
+                                        )
+                                        .clicked()
+                                {
+                                    self.set_game_macro_active(
+                                        game.pid,
+                                        &game.normalized_name,
+                                        true,
+                                    );
                                 }
                             }
                         });
@@ -2262,6 +2479,1398 @@ impl GuiApp {
             });
         self.show_process_modal = open;
     }
+
+    fn open_macro_modal_for_game(&mut self, pid: u32, name: &str, normalized_name: &str) {
+        self.macro_target_pid = Some(pid);
+        self.macro_target_name = name.to_string();
+        self.macro_target_normalized = normalized_name.to_string();
+        self.capturing_macro_key_for = None;
+        self.show_macro_modal = true;
+    }
+
+    fn set_game_macro_active(&mut self, pid: u32, normalized_name: &str, active: bool) {
+        if let Some(inst) = self.macro_statuses.iter_mut().find(|s| s.pid == pid) {
+            inst.active = active;
+        }
+        let _ = self.ui_tx.send(UiCmd::SetMacroActive {
+            pid,
+            normalized_name: normalized_name.to_string(),
+            active,
+        });
+    }
+
+    fn update_game_macro_rules(
+        &mut self,
+        pid: u32,
+        normalized_name: &str,
+        mode: MacroExecutionMode,
+        cycle_interval_ms: u64,
+        toggle_key: String,
+        rules: Vec<MacroRule>,
+    ) {
+        let clean: Vec<MacroRule> = rules.into_iter().map(MacroRule::normalized).collect();
+        let clean_cycle = if cycle_interval_ms == 0 {
+            DEFAULT_CYCLE_INTERVAL_MS
+        } else {
+            cycle_interval_ms.clamp(MIN_MACRO_INTERVAL_MS, MAX_MACRO_INTERVAL_MS)
+        };
+        let entry = self
+            .app_config
+            .macros
+            .entry(normalized_name.to_string())
+            .or_default();
+        entry.mode = mode;
+        entry.cycle_interval_ms = clean_cycle;
+        entry.toggle_key = toggle_key.clone();
+        entry.rules = clean.clone();
+        if let Some(inst) = self.macro_statuses.iter_mut().find(|s| s.pid == pid) {
+            inst.mode = mode;
+            inst.cycle_interval_ms = clean_cycle;
+            inst.toggle_key = toggle_key.clone();
+            inst.rules = clean.clone();
+            inst.rule_triggers.resize(clean.len(), 0);
+        }
+        let _ = self.ui_tx.send(UiCmd::SetMacroRules {
+            pid,
+            normalized_name: normalized_name.to_string(),
+            mode,
+            cycle_interval_ms: clean_cycle,
+            toggle_key,
+            rules: clean,
+        });
+        self.save_app_config();
+    }
+
+    fn draw_macro_modal(&mut self, ctx: &egui::Context) {
+        let Some(target_pid) = self.macro_target_pid else {
+            self.show_macro_modal = false;
+            return;
+        };
+
+        // Keep target metadata synced if the user switches between running game windows
+        let running_games = self
+            .report
+            .as_ref()
+            .map(|r| r.games.clone())
+            .unwrap_or_default();
+        if let Some(g) = running_games.iter().find(|g| g.pid == target_pid) {
+            self.macro_target_name = g.name.clone();
+            self.macro_target_normalized = g.normalized_name.clone();
+        }
+
+        let norm_name = self.macro_target_normalized.clone();
+        let display_name = if self.macro_target_name.is_empty() {
+            norm_name.clone()
+        } else {
+            self.macro_target_name.clone()
+        };
+
+        let inst_status = self
+            .macro_statuses
+            .iter()
+            .find(|s| s.pid == target_pid)
+            .cloned();
+        let is_running = running_games.iter().any(|g| g.pid == target_pid);
+        let is_active = inst_status.as_ref().is_some_and(|s| s.active);
+        let waiting_for_next_cycle = inst_status
+            .as_ref()
+            .is_some_and(|s| s.waiting_for_next_cycle);
+        let current_step_idx = inst_status.as_ref().and_then(|s| s.current_step_index);
+        let window_title = inst_status.as_ref().and_then(|s| s.window_title.clone());
+        let total_sent = inst_status.as_ref().map(|s| s.total_triggers).unwrap_or(0);
+        let rule_triggers = inst_status
+            .as_ref()
+            .map(|s| s.rule_triggers.clone())
+            .unwrap_or_default();
+
+        let mut profile: GameMacroProfile = self
+            .app_config
+            .macros
+            .get(&norm_name)
+            .cloned()
+            .unwrap_or_default()
+            .normalized();
+        if let Some(st) = &inst_status {
+            profile.mode = st.mode;
+            if st.cycle_interval_ms > 0 {
+                profile.cycle_interval_ms = st.cycle_interval_ms;
+            }
+            if !st.rules.is_empty() || profile.rules.is_empty() {
+                profile.rules = st.rules.clone();
+            }
+        }
+
+        // Handle continuous sequence recording or single-step / toggle-key capture
+        if self.recording_macro_sequence {
+            let mut captured_codes: Vec<&'static str> = Vec::new();
+            let mut stop_recording = false;
+            ctx.input(|input| {
+                if input.key_pressed(egui::Key::Escape) {
+                    stop_recording = true;
+                    return;
+                }
+                for event in &input.events {
+                    if let egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    } = event
+                    {
+                        if let Some(code) = egui_key_to_code(*key) {
+                            captured_codes.push(code);
+                        }
+                    }
+                }
+            });
+            if stop_recording {
+                self.recording_macro_sequence = false;
+            } else if !captured_codes.is_empty() {
+                for code in captured_codes {
+                    profile.rules.push(
+                        MacroRule {
+                            label: String::new(),
+                            key: code.to_string(),
+                            interval_ms: self.default_macro_delay_ms,
+                            hold_ms: DEFAULT_MACRO_HOLD_MS,
+                            enabled: true,
+                        }
+                        .normalized(),
+                    );
+                }
+                self.update_game_macro_rules(
+                    target_pid,
+                    &norm_name,
+                    profile.mode,
+                    profile.cycle_interval_ms,
+                    profile.toggle_key.clone(),
+                    profile.rules.clone(),
+                );
+            }
+        } else if let Some(target_slot) = self.capturing_macro_key_for {
+            let mut captured_code: Option<&'static str> = None;
+            let mut cancel_capture = false;
+            ctx.input(|input| {
+                if input.key_pressed(egui::Key::Escape) {
+                    cancel_capture = true;
+                    return;
+                }
+                for event in &input.events {
+                    if let egui::Event::Key {
+                        key, pressed: true, ..
+                    } = event
+                    {
+                        if let Some(code) = egui_key_to_code(*key) {
+                            captured_code = Some(code);
+                            break;
+                        }
+                    }
+                }
+            });
+            if cancel_capture {
+                self.capturing_macro_key_for = None;
+            } else if let Some(code) = captured_code {
+                self.capturing_macro_key_for = None;
+                match target_slot {
+                    None => {
+                        profile.toggle_key = code.to_string();
+                        self.update_game_macro_rules(
+                            target_pid,
+                            &norm_name,
+                            profile.mode,
+                            profile.cycle_interval_ms,
+                            profile.toggle_key.clone(),
+                            profile.rules.clone(),
+                        );
+                    }
+                    Some(rule_idx) => {
+                        if let Some(rule) = profile.rules.get_mut(rule_idx) {
+                            rule.key = code.to_string();
+                            self.update_game_macro_rules(
+                                target_pid,
+                                &norm_name,
+                                profile.mode,
+                                profile.cycle_interval_ms,
+                                profile.toggle_key.clone(),
+                                profile.rules.clone(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut open = self.show_macro_modal;
+        egui::Window::new(format!("⌨️ Automação de Teclas (Macros) — {display_name}"))
+            .open(&mut open)
+            .default_width(650.0)
+            .min_width(520.0)
+            .resizable(true)
+            .collapsible(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(BG)
+                    .stroke(Stroke::new(1.5, ACCENT))
+                    .corner_radius(12.0)
+                    .inner_margin(16.0),
+            )
+            .show(ctx, |ui| {
+                let max_h = (ctx.content_rect().height() - 90.0).max(280.0);
+                egui::ScrollArea::vertical()
+                    .id_salt(SCROLL_AREA_IDS[11])
+                    .max_height(max_h)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        // 1. Multi-window switcher if multiple game windows are open
+                        if running_games.len() > 1 {
+                            section_label(ui, "JANELA SELECIONADA");
+                            ui.horizontal_wrapped(|ui| {
+                                for g in &running_games {
+                                    let selected = g.pid == target_pid;
+                                    let g_active = self
+                                        .macro_statuses
+                                        .iter()
+                                        .any(|s| s.pid == g.pid && s.active);
+                                    let status_dot = if g_active { "●" } else { "○" };
+                                    let fill = if selected { ACCENT_SOFT } else { BG_RAISED };
+                                    let stroke = if selected {
+                                        Stroke::new(1.2, ACCENT)
+                                    } else {
+                                        Stroke::new(1.0, STROKE)
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(format!(
+                                                    "{status_dot} {} (PID {})",
+                                                    g.name, g.pid
+                                                ))
+                                                .color(if g_active {
+                                                    OK
+                                                } else if selected {
+                                                    ACCENT
+                                                } else {
+                                                    TEXT
+                                                })
+                                                .size(11.5)
+                                                .strong(),
+                                            )
+                                            .fill(fill)
+                                            .stroke(stroke)
+                                            .corner_radius(6.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.macro_target_pid = Some(g.pid);
+                                        self.macro_target_name = g.name.clone();
+                                        self.macro_target_normalized = g.normalized_name.clone();
+                                        self.capturing_macro_key_for = None;
+                                    }
+                                }
+                            });
+                            ui.add_space(8.0);
+                        }
+
+                        // 2. Top Control Card (Status + Play/Pause Button cleanly separated)
+                        egui::Frame::new()
+                            .fill(BG_RAISED)
+                            .stroke(Stroke::new(
+                                1.2,
+                                if is_active { OK } else { STROKE },
+                            ))
+                            .corner_radius(10.0)
+                            .inner_margin(12.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let (dot_col, status_title) = if !is_running {
+                                        (MUTED, "PROCESSO ENCERRADO")
+                                    } else if is_active {
+                                        (OK, "AUTOMAÇÃO EM EXECUÇÃO NESTA JANELA")
+                                    } else {
+                                        (ACCENT, "AUTOMAÇÃO PAUSADA NESTA JANELA")
+                                    };
+                                    ui.label(
+                                        RichText::new("●")
+                                            .color(dot_col)
+                                            .size(16.0)
+                                            .strong(),
+                                    );
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            RichText::new(status_title)
+                                                .color(dot_col)
+                                                .strong()
+                                                .size(13.5),
+                                        );
+                                        let win_desc = match &window_title {
+                                            Some(t) => format!(
+                                                "Janela: \"{t}\" (PID {target_pid})  •  Ações enviadas: {total_sent}"
+                                            ),
+                                            None => format!(
+                                                "Processo: {display_name} (PID {target_pid})  •  Ações enviadas: {total_sent}"
+                                            ),
+                                        };
+                                        ui.label(
+                                            RichText::new(win_desc)
+                                                .color(TEXT)
+                                                .size(12.0),
+                                        );
+                                    });
+
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let can_start = is_running
+                                                && profile.rules.iter().any(MacroRule::is_ready);
+                                            if is_active {
+                                                if ui
+                                                    .add_sized(
+                                                        [180.0, 38.0],
+                                                        egui::Button::new(
+                                                            RichText::new("⏸  Pausar Automação")
+                                                                .color(Color32::from_rgb(
+                                                                    254, 202, 202,
+                                                                ))
+                                                                .strong()
+                                                                .size(13.0),
+                                                        )
+                                                        .fill(Color32::from_rgb(95, 28, 28))
+                                                        .corner_radius(8.0),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.set_game_macro_active(
+                                                        target_pid, &norm_name, false,
+                                                    );
+                                                }
+                                            } else {
+                                                let btn = ui
+                                                    .add_enabled_ui(can_start, |ui| {
+                                                        ui.add_sized(
+                                                            [180.0, 38.0],
+                                                            egui::Button::new(
+                                                                RichText::new(
+                                                                    "▶  Iniciar Automação",
+                                                                )
+                                                                .color(Color32::from_rgb(
+                                                                    18, 14, 8,
+                                                                ))
+                                                                .strong()
+                                                                .size(13.0),
+                                                            )
+                                                            .fill(ACCENT)
+                                                            .corner_radius(8.0),
+                                                        )
+                                                    })
+                                                    .inner;
+                                                if btn
+                                                    .on_disabled_hover_text(
+                                                        "Adicione pelo menos 1 passo abaixo para iniciar",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.set_game_macro_active(
+                                                        target_pid, &norm_name, true,
+                                                    );
+                                                }
+                                            }
+                                        },
+                                    );
+                                });
+
+                                ui.add_space(6.0);
+                                ui.separator();
+                                ui.add_space(4.0);
+
+                                // Execution Mode selector (Sequential vs Parallel)
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        RichText::new("Modo de reprodução:")
+                                            .color(MUTED)
+                                            .size(12.0)
+                                            .strong(),
+                                    );
+                                    let is_seq = profile.mode == MacroExecutionMode::Sequential;
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(
+                                                    "1 → 2 → 3  Em Sequência (Uma após a outra)",
+                                                )
+                                                .color(if is_seq { ACCENT } else { TEXT })
+                                                .size(11.5)
+                                                .strong(),
+                                            )
+                                            .fill(if is_seq { ACCENT_SOFT } else { BG_ROW })
+                                            .stroke(Stroke::new(
+                                                1.0,
+                                                if is_seq { ACCENT } else { STROKE },
+                                            ))
+                                            .corner_radius(6.0),
+                                        )
+                                        .on_hover_text(
+                                            "Executa a sequência de teclas em ordem (ex: 50ms entre elas) e aguarda o tempo de disparo configurado para repetir a sequência",
+                                        )
+                                        .clicked()
+                                        && !is_seq
+                                    {
+                                        self.update_game_macro_rules(
+                                            target_pid,
+                                            &norm_name,
+                                            MacroExecutionMode::Sequential,
+                                            profile.cycle_interval_ms,
+                                            profile.toggle_key.clone(),
+                                            profile.rules.clone(),
+                                        );
+                                    }
+
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(
+                                                    "⚡ Simultâneo (Timers independentes)",
+                                                )
+                                                .color(if !is_seq { ACCENT } else { TEXT })
+                                                .size(11.5)
+                                                .strong(),
+                                            )
+                                            .fill(if !is_seq { ACCENT_SOFT } else { BG_ROW })
+                                            .stroke(Stroke::new(
+                                                1.0,
+                                                if !is_seq { ACCENT } else { STROKE },
+                                            ))
+                                            .corner_radius(6.0),
+                                        )
+                                        .on_hover_text(
+                                            "Cada tecla tem seu próprio cronômetro separado e dispara independentemente das outras",
+                                        )
+                                        .clicked()
+                                        && is_seq
+                                    {
+                                        self.update_game_macro_rules(
+                                            target_pid,
+                                            &norm_name,
+                                            MacroExecutionMode::Parallel,
+                                            profile.cycle_interval_ms,
+                                            profile.toggle_key.clone(),
+                                            profile.rules.clone(),
+                                        );
+                                    }
+                                });
+
+                                if profile.mode == MacroExecutionMode::Sequential {
+                                    ui.add_space(6.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(
+                                            RichText::new("Disparar a sequência a cada:")
+                                                .color(TEXT)
+                                                .size(12.0)
+                                                .strong(),
+                                        );
+                                        let mut cycle_ms = profile.cycle_interval_ms;
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut cycle_ms)
+                                                    .speed(100.0)
+                                                    .range(
+                                                        MIN_MACRO_INTERVAL_MS
+                                                            ..=MAX_MACRO_INTERVAL_MS,
+                                                    )
+                                                    .suffix(" ms"),
+                                            )
+                                            .on_hover_text(
+                                                "Tempo de espera após terminar a sequência completa antes de disparar o Passo 1 novamente (ex: 5000 ms = 5 segundos)",
+                                            )
+                                            .changed()
+                                        {
+                                            profile.cycle_interval_ms = cycle_ms;
+                                            self.update_game_macro_rules(
+                                                target_pid,
+                                                &norm_name,
+                                                profile.mode,
+                                                cycle_ms,
+                                                profile.toggle_key.clone(),
+                                                profile.rules.clone(),
+                                            );
+                                        }
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "({:.1}s)",
+                                                profile.cycle_interval_ms as f64 / 1000.0
+                                            ))
+                                            .color(ACCENT)
+                                            .size(11.5)
+                                            .strong()
+                                            .monospace(),
+                                        );
+
+                                        for (lbl, ms) in [
+                                            ("1s", 1_000u64),
+                                            ("2s", 2_000),
+                                            ("3s", 3_000),
+                                            ("5s", 5_000),
+                                            ("10s", 10_000),
+                                            ("15s", 15_000),
+                                            ("30s", 30_000),
+                                        ] {
+                                            let active_preset = profile.cycle_interval_ms == ms;
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new(lbl)
+                                                            .color(if active_preset {
+                                                                ACCENT
+                                                            } else {
+                                                                MUTED
+                                                            })
+                                                            .size(11.0)
+                                                            .strong(),
+                                                    )
+                                                    .fill(if active_preset {
+                                                        ACCENT_SOFT
+                                                    } else {
+                                                        BG_ROW
+                                                    })
+                                                    .stroke(Stroke::new(
+                                                        1.0,
+                                                        if active_preset { ACCENT } else { STROKE },
+                                                    ))
+                                                    .corner_radius(5.0),
+                                                )
+                                                .on_hover_text(format!(
+                                                    "Repetir a sequência inteira a cada {lbl} ({ms} ms)"
+                                                ))
+                                                .clicked()
+                                            {
+                                                profile.cycle_interval_ms = ms;
+                                                self.update_game_macro_rules(
+                                                    target_pid,
+                                                    &norm_name,
+                                                    profile.mode,
+                                                    ms,
+                                                    profile.toggle_key.clone(),
+                                                    profile.rules.clone(),
+                                                );
+                                            }
+                                        }
+                                    });
+                                }
+
+                                ui.add_space(6.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        RichText::new(
+                                            "Tecla para Parar / Iniciar dentro da janela do jogo:",
+                                        )
+                                        .color(TEXT)
+                                        .size(12.0)
+                                        .strong(),
+                                    );
+                                    let prev_toggle = profile.toggle_key.clone();
+                                    let toggle_display = if profile.toggle_key.is_empty() {
+                                        "Desativado".to_string()
+                                    } else {
+                                        format!("⌨️ {}", key_display_label(&profile.toggle_key))
+                                    };
+                                    egui::ComboBox::from_id_salt("macro-window-toggle-key")
+                                        .selected_text(
+                                            RichText::new(toggle_display)
+                                                .color(if profile.toggle_key.is_empty() {
+                                                    MUTED
+                                                } else {
+                                                    ACCENT
+                                                })
+                                                .strong()
+                                                .size(12.0),
+                                        )
+                                        .width(140.0)
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut profile.toggle_key,
+                                                String::new(),
+                                                "Desativado",
+                                            );
+                                            ui.separator();
+                                            let mut last_cat = "";
+                                            for spec in SUPPORTED_KEYS {
+                                                if spec.vk == 0 {
+                                                    continue;
+                                                }
+                                                if spec.category != last_cat {
+                                                    if !last_cat.is_empty() {
+                                                        ui.separator();
+                                                    }
+                                                    ui.label(
+                                                        RichText::new(spec.category)
+                                                            .color(MUTED)
+                                                            .size(10.5)
+                                                            .strong(),
+                                                    );
+                                                    last_cat = spec.category;
+                                                }
+                                                ui.selectable_value(
+                                                    &mut profile.toggle_key,
+                                                    spec.code.to_string(),
+                                                    spec.label,
+                                                );
+                                            }
+                                        });
+                                    if profile.toggle_key != prev_toggle {
+                                        self.update_game_macro_rules(
+                                            target_pid,
+                                            &norm_name,
+                                            profile.mode,
+                                            profile.cycle_interval_ms,
+                                            profile.toggle_key.clone(),
+                                            profile.rules.clone(),
+                                        );
+                                    }
+
+                                    let is_cap_toggle = self.capturing_macro_key_for == Some(None);
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(if is_cap_toggle {
+                                                    "Aperte a tecla... (Esc)"
+                                                } else {
+                                                    "Capturar"
+                                                })
+                                                .color(if is_cap_toggle { ACCENT } else { MUTED })
+                                                .size(11.0),
+                                            )
+                                            .fill(if is_cap_toggle {
+                                                ACCENT_SOFT
+                                            } else {
+                                                BG_ROW
+                                            })
+                                            .stroke(Stroke::new(
+                                                1.0,
+                                                if is_cap_toggle { ACCENT } else { STROKE },
+                                            ))
+                                            .corner_radius(5.0),
+                                        )
+                                        .on_hover_text(
+                                            "Clique e aperte a tecla que deseja usar dentro da janela do jogo para ligar/desligar o macro naquela janela",
+                                        )
+                                        .clicked()
+                                    {
+                                        self.recording_macro_sequence = false;
+                                        self.capturing_macro_key_for = if is_cap_toggle {
+                                            None
+                                        } else {
+                                            Some(None)
+                                        };
+                                    }
+
+                                    ui.label(
+                                        RichText::new(if profile.toggle_key.is_empty() {
+                                            "(Atalho desativado)".to_string()
+                                        } else {
+                                            format!(
+                                                "• Ao apertar {} dentro de uma janela do jogo, para/inicia APENAS naquela janela.",
+                                                key_display_label(&profile.toggle_key)
+                                            )
+                                        })
+                                        .color(MUTED)
+                                        .size(11.0),
+                                    );
+                                });
+
+                                ui.add_space(4.0);
+                                let mode_hint = match profile.mode {
+                                    MacroExecutionMode::Sequential => {
+                                        "Como funciona: Executa os passos na ordem (ex: 50 ms entre uma tecla e outra) e, ao terminar o último passo, aguarda o tempo de disparo acima (ex: 5s ou 10s) antes de repetir."
+                                    }
+                                    MacroExecutionMode::Parallel => {
+                                        "Como funciona: Cada tecla da lista roda no seu próprio intervalo de tempo de forma independente."
+                                    }
+                                };
+                                ui.label(RichText::new(mode_hint).color(MUTED).size(11.0));
+
+                                ui.add_space(4.0);
+                                let mut auto_start = profile.auto_start;
+                                if ui
+                                    .checkbox(
+                                        &mut auto_start,
+                                        RichText::new(
+                                            "Iniciar automaticamente sempre que este jogo for aberto (Opcional)",
+                                        )
+                                        .color(MUTED)
+                                        .size(11.5),
+                                    )
+                                    .changed()
+                                {
+                                    self.app_config
+                                        .macros
+                                        .entry(norm_name.clone())
+                                        .or_default()
+                                        .auto_start = auto_start;
+                                    self.save_app_config();
+                                }
+                            });
+
+                        ui.add_space(12.0);
+
+                        // 3. Toolbar to add steps into the sequence (no hardcoded keys or preset timers)
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("+  Adicionar Passo")
+                                            .color(Color32::from_rgb(18, 14, 8))
+                                            .strong()
+                                            .size(12.5),
+                                    )
+                                    .fill(ACCENT)
+                                    .corner_radius(7.0),
+                                )
+                                .on_hover_text(
+                                    "Adiciona um novo passo na sequência e aguarda você pressionar ou selecionar a tecla",
+                                )
+                                .clicked()
+                            {
+                                self.recording_macro_sequence = false;
+                                let mut updated = profile.rules.clone();
+                                let new_idx = updated.len();
+                                updated.push(
+                                    MacroRule {
+                                        label: String::new(),
+                                        key: String::new(),
+                                        interval_ms: self.default_macro_delay_ms,
+                                        hold_ms: DEFAULT_MACRO_HOLD_MS,
+                                        enabled: true,
+                                    }
+                                    .normalized(),
+                                );
+                                self.capturing_macro_key_for = Some(Some(new_idx));
+                                self.update_game_macro_rules(
+                                    target_pid,
+                                    &norm_name,
+                                    profile.mode,
+                                    profile.cycle_interval_ms,
+                                    profile.toggle_key.clone(),
+                                    updated,
+                                );
+                            }
+
+                            let rec_active = self.recording_macro_sequence;
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(if rec_active {
+                                            "Parar Gravação (Esc)"
+                                        } else {
+                                            "●  Gravar Sequência pelo Teclado"
+                                        })
+                                        .color(if rec_active { ACCENT } else { TEXT })
+                                        .strong()
+                                        .size(12.0),
+                                    )
+                                    .fill(if rec_active { ACCENT_SOFT } else { BG_RAISED })
+                                    .stroke(Stroke::new(
+                                        1.0,
+                                        if rec_active { ACCENT } else { STROKE },
+                                    ))
+                                    .corner_radius(7.0),
+                                )
+                                .on_hover_text(
+                                    "Clique e vá apertando as teclas no teclado na ordem desejada; cada tecla será adicionada uma após a outra com o intervalo padrão ao lado",
+                                )
+                                .clicked()
+                            {
+                                self.recording_macro_sequence = !rec_active;
+                                self.capturing_macro_key_for = None;
+                            }
+
+                            ui.separator();
+
+                            ui.label(
+                                RichText::new("Tempo entre teclas:")
+                                    .color(MUTED)
+                                    .size(11.5),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut self.default_macro_delay_ms)
+                                    .speed(5.0)
+                                    .range(MIN_MACRO_INTERVAL_MS..=MAX_MACRO_INTERVAL_MS)
+                                    .suffix(" ms"),
+                            )
+                            .on_hover_text(
+                                "Intervalo padrão entre uma tecla e a próxima da sequência (ex: 50 ms para executar uma tecla 50ms atrás da outra)",
+                            );
+
+                            if !profile.rules.is_empty()
+                                && ui
+                                    .small_button(
+                                        RichText::new(format!(
+                                            "Aplicar {} ms a todos",
+                                            self.default_macro_delay_ms
+                                        ))
+                                        .color(TEXT)
+                                        .size(11.0),
+                                    )
+                                    .on_hover_text(
+                                        "Define este intervalo entre teclas em todos os passos da sequência abaixo",
+                                    )
+                                    .clicked()
+                            {
+                                let updated: Vec<MacroRule> = profile
+                                    .rules
+                                    .iter()
+                                    .cloned()
+                                    .map(|mut r| {
+                                        r.interval_ms = self.default_macro_delay_ms;
+                                        r.normalized()
+                                    })
+                                    .collect();
+                                self.update_game_macro_rules(
+                                    target_pid,
+                                    &norm_name,
+                                    profile.mode,
+                                    profile.cycle_interval_ms,
+                                    profile.toggle_key.clone(),
+                                    updated,
+                                );
+                            }
+
+                            if !profile.rules.is_empty() {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .small_button(
+                                                RichText::new("Limpar Tudo")
+                                                    .color(MUTED)
+                                                    .size(11.0),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.recording_macro_sequence = false;
+                                            self.capturing_macro_key_for = None;
+                                            self.set_game_macro_active(
+                                                target_pid, &norm_name, false,
+                                            );
+                                            self.update_game_macro_rules(
+                                                target_pid,
+                                                &norm_name,
+                                                profile.mode,
+                                                profile.cycle_interval_ms,
+                                                profile.toggle_key.clone(),
+                                                Vec::new(),
+                                            );
+                                        }
+                                    },
+                                );
+                            }
+                        });
+
+                        ui.add_space(8.0);
+
+                        // 4. Unified Step-by-Step Sequence List
+                        if profile.rules.is_empty() {
+                            egui::Frame::new()
+                                .fill(BG_RAISED)
+                                .stroke(Stroke::new(1.0, STROKE))
+                                .corner_radius(8.0)
+                                .inner_margin(20.0)
+                                .show(ui, |ui| {
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(
+                                            RichText::new(
+                                                "Nenhum passo configurado ainda.",
+                                            )
+                                            .color(TEXT)
+                                            .strong()
+                                            .size(13.5),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Use '+ Adicionar Passo' ou '● Gravar Sequência pelo Teclado' acima para definir suas teclas na ordem desejada (padrão: 50 ms entre cada tecla).",
+                                            )
+                                            .color(MUTED)
+                                            .size(12.0),
+                                        );
+                                    });
+                                });
+                        } else {
+                            let mut rules_mut = profile.rules.clone();
+                            let total_rules = rules_mut.len();
+                            let mut rules_changed = false;
+                            let mut remove_idx: Option<usize> = None;
+                            let mut swap_pair: Option<(usize, usize)> = None;
+
+                            let list = egui::ScrollArea::vertical()
+                                .id_salt(SCROLL_AREA_IDS[12])
+                                .max_height(290.0)
+                                .auto_shrink([false; 2])
+                                .show(ui, |ui| {
+                                    for (idx, rule) in rules_mut.iter_mut().enumerate() {
+                                        let trig =
+                                            rule_triggers.get(idx).copied().unwrap_or(0);
+                                        let is_current_step = is_active
+                                            && profile.mode == MacroExecutionMode::Sequential
+                                            && current_step_idx == Some(idx);
+
+                                        let border_stroke = if is_current_step {
+                                            Stroke::new(1.6, OK)
+                                        } else if rule.enabled && is_active {
+                                            Stroke::new(1.0, OK.gamma_multiply(0.45))
+                                        } else {
+                                            Stroke::new(1.0, STROKE)
+                                        };
+
+                                        egui::Frame::new()
+                                            .fill(BG_ROW)
+                                            .stroke(border_stroke)
+                                            .corner_radius(8.0)
+                                            .inner_margin(egui::Margin::symmetric(12, 9))
+                                            .show(ui, |ui| {
+                                                // Top line of step card: Step badge + Key selector + Delay + Actions
+                                                ui.horizontal_wrapped(|ui| {
+                                                    if ui
+                                                        .checkbox(&mut rule.enabled, "")
+                                                        .on_hover_text(
+                                                            "Ativar ou desativar este passo",
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        rules_changed = true;
+                                                    }
+
+                                                    // Step number pill
+                                                    let step_badge = if is_current_step {
+                                                        format!("▶ PASSO {}", idx + 1)
+                                                    } else {
+                                                        format!("PASSO {}", idx + 1)
+                                                    };
+                                                    egui::Frame::new()
+                                                        .fill(if is_current_step {
+                                                            Color32::from_rgb(16, 68, 48)
+                                                        } else {
+                                                            BG_RAISED
+                                                        })
+                                                        .corner_radius(5.0)
+                                                        .inner_margin(egui::Margin::symmetric(
+                                                            7, 3,
+                                                        ))
+                                                        .show(ui, |ui| {
+                                                            ui.label(
+                                                                RichText::new(step_badge)
+                                                                    .color(if is_current_step {
+                                                                        OK
+                                                                    } else {
+                                                                        ACCENT
+                                                                    })
+                                                                    .size(11.0)
+                                                                    .strong()
+                                                                    .monospace(),
+                                                            );
+                                                        });
+
+                                                    // Key dropdown
+                                                    let prev_key = rule.key.clone();
+                                                    egui::ComboBox::from_id_salt((
+                                                        "rule-key-combo",
+                                                        idx,
+                                                    ))
+                                                    .selected_text(
+                                                        RichText::new(format!(
+                                                            "⌨️ {}",
+                                                            key_display_label(&rule.key)
+                                                        ))
+                                                        .color(TEXT)
+                                                        .strong()
+                                                        .size(12.5),
+                                                    )
+                                                    .width(165.0)
+                                                    .show_ui(ui, |ui| {
+                                                        let mut last_cat = "";
+                                                        for spec in SUPPORTED_KEYS {
+                                                            if spec.category != last_cat {
+                                                                if !last_cat.is_empty() {
+                                                                    ui.separator();
+                                                                }
+                                                                ui.label(
+                                                                    RichText::new(spec.category)
+                                                                        .color(MUTED)
+                                                                        .size(10.5)
+                                                                        .strong(),
+                                                                );
+                                                                last_cat = spec.category;
+                                                            }
+                                                            ui.selectable_value(
+                                                                &mut rule.key,
+                                                                spec.code.to_string(),
+                                                                spec.label,
+                                                            );
+                                                        }
+                                                    });
+                                                    if rule.key != prev_key {
+                                                        rules_changed = true;
+                                                    }
+
+                                                    // Key capture button for this step
+                                                    let is_cap_row = self.capturing_macro_key_for
+                                                        == Some(Some(idx));
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(
+                                                                RichText::new(if is_cap_row {
+                                                                    "Aperte a tecla... (Esc)"
+                                                                } else {
+                                                                    "Capturar"
+                                                                })
+                                                                .color(if is_cap_row {
+                                                                    ACCENT
+                                                                } else {
+                                                                    MUTED
+                                                                })
+                                                                .size(11.0),
+                                                            )
+                                                            .fill(if is_cap_row {
+                                                                ACCENT_SOFT
+                                                            } else {
+                                                                BG_RAISED
+                                                            })
+                                                            .stroke(Stroke::new(
+                                                                1.0,
+                                                                if is_cap_row {
+                                                                    ACCENT
+                                                                } else {
+                                                                    STROKE
+                                                                },
+                                                            ))
+                                                            .corner_radius(5.0),
+                                                        )
+                                                        .on_hover_text(
+                                                            "Clique aqui e aperte uma tecla do teclado para definir neste passo",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        self.capturing_macro_key_for =
+                                                            if is_cap_row {
+                                                                None
+                                                            } else {
+                                                                Some(Some(idx))
+                                                            };
+                                                    }
+
+                                                    // Wait / Interval control
+                                                    let is_last_seq_step = profile.mode
+                                                        == MacroExecutionMode::Sequential
+                                                        && idx + 1 == total_rules;
+                                                    if is_last_seq_step {
+                                                        ui.label(
+                                                            RichText::new(
+                                                                "→ Última tecla da sequência",
+                                                            )
+                                                            .color(MUTED)
+                                                            .size(11.5),
+                                                        );
+                                                    } else {
+                                                        let wait_label = match profile.mode {
+                                                            MacroExecutionMode::Sequential => {
+                                                                "→ Próxima tecla em:"
+                                                            }
+                                                            MacroExecutionMode::Parallel => {
+                                                                "Repetir a cada:"
+                                                            }
+                                                        };
+                                                        ui.label(
+                                                            RichText::new(wait_label)
+                                                                .color(MUTED)
+                                                                .size(11.5),
+                                                        );
+                                                        if ui
+                                                            .add(
+                                                                egui::DragValue::new(
+                                                                    &mut rule.interval_ms,
+                                                                )
+                                                                .speed(5.0)
+                                                                .range(
+                                                                    MIN_MACRO_INTERVAL_MS
+                                                                        ..=MAX_MACRO_INTERVAL_MS,
+                                                                )
+                                                                .suffix(" ms"),
+                                                            )
+                                                            .on_hover_text(
+                                                                "Tempo de espera (em milissegundos) antes da próxima tecla. Ex: 50 ms executa a próxima tecla 50ms depois desta.",
+                                                            )
+                                                            .changed()
+                                                        {
+                                                            rules_changed = true;
+                                                        }
+                                                        if rule.interval_ms >= 1000 {
+                                                            ui.label(
+                                                                RichText::new(format!(
+                                                                    "({:.1}s)",
+                                                                    rule.interval_ms as f64 / 1000.0
+                                                                ))
+                                                                .color(MUTED)
+                                                                .size(11.0)
+                                                                .monospace(),
+                                                            );
+                                                        }
+                                                    }
+
+                                                    // Right-side controls: Reorder (↑ ↓), Trigger count, Test, Delete
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(
+                                                            egui::Align::Center,
+                                                        ),
+                                                        |ui| {
+                                                            if ui
+                                                                .small_button(
+                                                                    RichText::new("Remover")
+                                                                        .color(WARN)
+                                                                        .size(11.0),
+                                                                )
+                                                                .on_hover_text("Remover este passo")
+                                                                .clicked()
+                                                            {
+                                                                remove_idx = Some(idx);
+                                                            }
+
+                                                            if ui
+                                                                .small_button(
+                                                                    RichText::new("Testar")
+                                                                        .color(TEXT)
+                                                                        .size(11.0),
+                                                                )
+                                                                .on_hover_text(
+                                                                    "Enviar esta tecla 1 vez agora para testar no jogo",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                let _ = self.ui_tx.send(
+                                                                    UiCmd::TestMacroKey {
+                                                                        pid: target_pid,
+                                                                        normalized_name: norm_name
+                                                                            .clone(),
+                                                                        key: rule.key.clone(),
+                                                                    },
+                                                                );
+                                                            }
+
+                                                            if total_rules > 1 {
+                                                                if ui
+                                                                    .add_enabled(
+                                                                        idx + 1 < total_rules,
+                                                                        egui::Button::new(
+                                                                            RichText::new("↓")
+                                                                                .size(11.0),
+                                                                        )
+                                                                        .small(),
+                                                                    )
+                                                                    .on_hover_text(
+                                                                        "Mover passo para baixo",
+                                                                    )
+                                                                    .clicked()
+                                                                {
+                                                                    swap_pair =
+                                                                        Some((idx, idx + 1));
+                                                                }
+                                                                if ui
+                                                                    .add_enabled(
+                                                                        idx > 0,
+                                                                        egui::Button::new(
+                                                                            RichText::new("↑")
+                                                                                .size(11.0),
+                                                                        )
+                                                                        .small(),
+                                                                    )
+                                                                    .on_hover_text(
+                                                                        "Mover passo para cima",
+                                                                    )
+                                                                    .clicked()
+                                                                {
+                                                                    swap_pair =
+                                                                        Some((idx, idx - 1));
+                                                                }
+                                                            }
+
+                                                            ui.label(
+                                                                RichText::new(format!(
+                                                                    "{trig}x"
+                                                                ))
+                                                                .color(if trig > 0 {
+                                                                    OK
+                                                                } else {
+                                                                    MUTED
+                                                                })
+                                                                .size(11.0)
+                                                                .monospace(),
+                                                            )
+                                                            .on_hover_text(
+                                                                "Quantas vezes este passo já foi enviado nesta sessão",
+                                                            );
+                                                        },
+                                                    );
+                                                });
+                                            });
+
+                                        // Visual connector arrow between sequential steps or cycle footer
+                                        if profile.mode == MacroExecutionMode::Sequential {
+                                            if idx + 1 < total_rules {
+                                                ui.horizontal(|ui| {
+                                                    ui.add_space(28.0);
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "↓  após {} ms executa:",
+                                                            rule.interval_ms
+                                                        ))
+                                                        .color(MUTED)
+                                                        .size(10.5),
+                                                    );
+                                                });
+                                            } else {
+                                                ui.add_space(6.0);
+                                                egui::Frame::new()
+                                                    .fill(if waiting_for_next_cycle {
+                                                        Color32::from_rgb(16, 68, 48)
+                                                    } else {
+                                                        BG_RAISED
+                                                    })
+                                                    .stroke(Stroke::new(
+                                                        1.0,
+                                                        if waiting_for_next_cycle {
+                                                            OK
+                                                        } else {
+                                                            STROKE
+                                                        },
+                                                    ))
+                                                    .corner_radius(6.0)
+                                                    .inner_margin(egui::Margin::symmetric(10, 6))
+                                                    .show(ui, |ui| {
+                                                        let cycle_sec = profile.cycle_interval_ms
+                                                            as f64
+                                                            / 1000.0;
+                                                        let text = if waiting_for_next_cycle {
+                                                            format!(
+                                                                "▶  Fim da sequência — aguardando {} ms ({cycle_sec:.1}s) para disparar novamente do Passo 1...",
+                                                                profile.cycle_interval_ms
+                                                            )
+                                                        } else {
+                                                            format!(
+                                                                "●  Ao terminar este último passo, aguarda {} ms ({cycle_sec:.1}s) e repete a sequência do Passo 1",
+                                                                profile.cycle_interval_ms
+                                                            )
+                                                        };
+                                                        ui.label(
+                                                            RichText::new(text)
+                                                                .color(if waiting_for_next_cycle {
+                                                                    OK
+                                                                } else {
+                                                                    ACCENT
+                                                                })
+                                                                .size(11.5)
+                                                                .strong(),
+                                                        );
+                                                    });
+                                            }
+                                        } else {
+                                            ui.add_space(4.0);
+                                        }
+                                    }
+                                });
+                            contain_list_scroll(ui, list.inner_rect);
+
+                            if let Some((a, b)) = swap_pair {
+                                rules_mut.swap(a, b);
+                                rules_changed = true;
+                            }
+                            if let Some(idx) = remove_idx {
+                                rules_mut.remove(idx);
+                                rules_changed = true;
+                            }
+                            if rules_changed {
+                                self.update_game_macro_rules(
+                                    target_pid,
+                                    &norm_name,
+                                    profile.mode,
+                                    profile.cycle_interval_ms,
+                                    profile.toggle_key.clone(),
+                                    rules_mut,
+                                );
+                            }
+                        }
+                    });
+            });
+        if !open {
+            self.capturing_macro_key_for = None;
+            self.recording_macro_sequence = false;
+        }
+        self.show_macro_modal = open;
+    }
+}
+
+fn egui_key_to_code(key: egui::Key) -> Option<&'static str> {
+    match key {
+        egui::Key::F1 => Some("F1"),
+        egui::Key::F2 => Some("F2"),
+        egui::Key::F3 => Some("F3"),
+        egui::Key::F4 => Some("F4"),
+        egui::Key::F5 => Some("F5"),
+        egui::Key::F6 => Some("F6"),
+        egui::Key::F7 => Some("F7"),
+        egui::Key::F8 => Some("F8"),
+        egui::Key::F9 => Some("F9"),
+        egui::Key::F10 => Some("F10"),
+        egui::Key::F11 => Some("F11"),
+        egui::Key::F12 => Some("F12"),
+        egui::Key::Num0 => Some("0"),
+        egui::Key::Num1 => Some("1"),
+        egui::Key::Num2 => Some("2"),
+        egui::Key::Num3 => Some("3"),
+        egui::Key::Num4 => Some("4"),
+        egui::Key::Num5 => Some("5"),
+        egui::Key::Num6 => Some("6"),
+        egui::Key::Num7 => Some("7"),
+        egui::Key::Num8 => Some("8"),
+        egui::Key::Num9 => Some("9"),
+        egui::Key::Space => Some("SPACE"),
+        egui::Key::Tab => Some("TAB"),
+        egui::Key::Enter => Some("ENTER"),
+        egui::Key::Backspace => Some("BACKSPACE"),
+        egui::Key::Insert => Some("INSERT"),
+        egui::Key::Delete => Some("DELETE"),
+        egui::Key::Home => Some("HOME"),
+        egui::Key::End => Some("END"),
+        egui::Key::PageUp => Some("PAGEUP"),
+        egui::Key::PageDown => Some("PAGEDOWN"),
+        egui::Key::ArrowUp => Some("UP"),
+        egui::Key::ArrowDown => Some("DOWN"),
+        egui::Key::ArrowLeft => Some("LEFT"),
+        egui::Key::ArrowRight => Some("RIGHT"),
+        egui::Key::A => Some("A"),
+        egui::Key::B => Some("B"),
+        egui::Key::C => Some("C"),
+        egui::Key::D => Some("D"),
+        egui::Key::E => Some("E"),
+        egui::Key::F => Some("F"),
+        egui::Key::G => Some("G"),
+        egui::Key::H => Some("H"),
+        egui::Key::I => Some("I"),
+        egui::Key::J => Some("J"),
+        egui::Key::K => Some("K"),
+        egui::Key::L => Some("L"),
+        egui::Key::M => Some("M"),
+        egui::Key::N => Some("N"),
+        egui::Key::O => Some("O"),
+        egui::Key::P => Some("P"),
+        egui::Key::Q => Some("Q"),
+        egui::Key::R => Some("R"),
+        egui::Key::S => Some("S"),
+        egui::Key::T => Some("T"),
+        egui::Key::U => Some("U"),
+        egui::Key::V => Some("V"),
+        egui::Key::W => Some("W"),
+        egui::Key::X => Some("X"),
+        egui::Key::Y => Some("Y"),
+        egui::Key::Z => Some("Z"),
+        _ => None,
+    }
 }
 
 fn section_label(ui: &mut egui::Ui, text: &str) {
@@ -2322,6 +3931,7 @@ fn spawn_worker(
         let mut trim_game = initial_config.trim_game_memory;
         let mut config = initial_config;
         let mut tunnel_mgr = crate::tunnel::TunnelManager::new(config.wireguard.clone());
+        let mut macro_mgr = MacroManager::new(config.macros.clone());
         let mut save_due: Option<Instant> = None;
 
         // Start last_scan in the past so already-open games are scanned immediately on app launch
@@ -2329,7 +3939,9 @@ fn spawn_worker(
         let mut last_optimize = Instant::now();
         let mut prev_game_count = 0usize;
         let mut active_game_pids: Vec<u32> = Vec::new();
+        let mut active_games: Vec<(u32, String)> = Vec::new();
         let mut last_fast_tunnel_sync = Instant::now();
+        let mut last_macro_ui_sync = Instant::now();
 
         let sync_tunnel = |mgr: &mut crate::tunnel::TunnelManager,
                            pids: &[u32],
@@ -2369,7 +3981,14 @@ fn spawn_worker(
         };
 
         loop {
-            match ui_rx.recv_timeout(Duration::from_millis(150)) {
+            let poll_wait = if macro_mgr.has_active_instances() {
+                Duration::from_millis(10)
+            } else if macro_mgr.has_configured_instances() {
+                Duration::from_millis(30)
+            } else {
+                Duration::from_millis(150)
+            };
+            match ui_rx.recv_timeout(poll_wait) {
                 Ok(UiCmd::Scan) => {
                     if !config_valid {
                         continue;
@@ -2380,6 +3999,11 @@ fn spawn_worker(
                     });
                     prev_game_count = report.games.len();
                     active_game_pids = report.games.iter().map(|g| g.pid).collect();
+                    active_games = report
+                        .games
+                        .iter()
+                        .map(|g| (g.pid, g.normalized_name.clone()))
+                        .collect();
                     send_worker(
                         &ctx,
                         &worker_tx,
@@ -2389,6 +4013,8 @@ fn spawn_worker(
                         )),
                     );
                     sync_tunnel(&mut tunnel_mgr, &active_game_pids, &worker_tx);
+                    let macro_statuses = macro_mgr.tick(&active_games, Instant::now());
+                    send_worker(&ctx, &worker_tx, WorkerMsg::Macros(macro_statuses));
                     send_worker(&ctx, &worker_tx, WorkerMsg::Report(report));
                     last_scan = Instant::now();
                 }
@@ -2411,6 +4037,11 @@ fn spawn_worker(
                     });
                     prev_game_count = report.games.len();
                     active_game_pids = report.games.iter().map(|g| g.pid).collect();
+                    active_games = report
+                        .games
+                        .iter()
+                        .map(|g| (g.pid, g.normalized_name.clone()))
+                        .collect();
                     let ok = report.results.iter().filter(|r| r.ok).count();
                     let fail = report.results.iter().filter(|r| !r.ok).count();
                     send_worker(
@@ -2422,6 +4053,8 @@ fn spawn_worker(
                         )),
                     );
                     sync_tunnel(&mut tunnel_mgr, &active_game_pids, &worker_tx);
+                    let macro_statuses = macro_mgr.tick(&active_games, Instant::now());
+                    send_worker(&ctx, &worker_tx, WorkerMsg::Macros(macro_statuses));
                     send_worker(&ctx, &worker_tx, WorkerMsg::Report(report));
                     last_optimize = Instant::now();
                     last_scan = Instant::now();
@@ -2461,6 +4094,7 @@ fn spawn_worker(
                     config = *new_cfg;
                     trim_game = config.trim_game_memory;
                     interval = config.gui.watch_interval_secs;
+                    macro_mgr.update_profiles(config.macros.clone());
                     save_due = Some(Instant::now());
                 }
                 Ok(UiCmd::ReplaceConfig(new_cfg)) => {
@@ -2470,7 +4104,10 @@ fn spawn_worker(
                     trim_game = config.trim_game_memory;
                     watch_flag.store(config.gui.watch_enabled, Ordering::SeqCst);
                     tunnel_mgr.update_config(config.wireguard.clone());
+                    macro_mgr.update_profiles(config.macros.clone());
                     send_worker(&ctx, &worker_tx, WorkerMsg::Tunnel(tunnel_mgr.status()));
+                    let macro_statuses = macro_mgr.tick(&active_games, Instant::now());
+                    send_worker(&ctx, &worker_tx, WorkerMsg::Macros(macro_statuses));
                 }
                 Ok(UiCmd::CommitConfig(new_cfg)) => {
                     config = *new_cfg;
@@ -2478,6 +4115,7 @@ fn spawn_worker(
                     interval = config.gui.watch_interval_secs;
                     trim_game = config.trim_game_memory;
                     tunnel_mgr.update_config(config.wireguard.clone());
+                    macro_mgr.update_profiles(config.macros.clone());
                     match config.save_to_path(&config_path) {
                         Ok(()) => {
                             save_due = None;
@@ -2522,8 +4160,72 @@ fn spawn_worker(
                     }
                     send_worker(&ctx, &worker_tx, WorkerMsg::Tunnel(tunnel_mgr.status()));
                 }
+                Ok(UiCmd::SetMacroActive {
+                    pid,
+                    normalized_name,
+                    active,
+                }) => {
+                    let st = macro_mgr.set_instance_active(pid, &normalized_name, active);
+                    let state_str = if st.active { "ATIVADA" } else { "PAUSADA" };
+                    send_worker(
+                        &ctx,
+                        &worker_tx,
+                        WorkerMsg::Log(format!(
+                            "⌨️ [Macro] Automação {state_str} para {normalized_name} (PID {pid})."
+                        )),
+                    );
+                    let statuses = macro_mgr.tick(&active_games, Instant::now());
+                    send_worker(&ctx, &worker_tx, WorkerMsg::Macros(statuses));
+                }
+                Ok(UiCmd::SetMacroRules {
+                    pid,
+                    normalized_name,
+                    mode,
+                    cycle_interval_ms,
+                    toggle_key,
+                    rules,
+                }) => {
+                    macro_mgr.set_instance_rules(
+                        pid,
+                        &normalized_name,
+                        mode,
+                        cycle_interval_ms,
+                        toggle_key,
+                        rules,
+                    );
+                    let statuses = macro_mgr.tick(&active_games, Instant::now());
+                    send_worker(&ctx, &worker_tx, WorkerMsg::Macros(statuses));
+                }
+                Ok(UiCmd::TestMacroKey {
+                    pid,
+                    normalized_name,
+                    key,
+                }) => {
+                    let sent = macro_mgr.test_single_key(pid, &normalized_name, &key);
+                    let label = key_display_label(&key);
+                    if sent > 0 {
+                        send_worker(
+                            &ctx,
+                            &worker_tx,
+                            WorkerMsg::Log(format!(
+                                "⌨️ [Macro] Teste de '{label}' enviado para {normalized_name} (PID {pid})."
+                            )),
+                        );
+                    } else {
+                        send_worker(
+                            &ctx,
+                            &worker_tx,
+                            WorkerMsg::Log(format!(
+                                "⚠️ [Macro] Não foi possível encontrar janela visível para PID {pid} ao testar '{label}'."
+                            )),
+                        );
+                    }
+                    let statuses = macro_mgr.tick(&active_games, Instant::now());
+                    send_worker(&ctx, &worker_tx, WorkerMsg::Macros(statuses));
+                }
                 Ok(UiCmd::Shutdown) => {
                     watch_flag.store(false, Ordering::SeqCst);
+                    macro_mgr.shutdown();
                     tunnel_mgr.shutdown();
                     if save_due.take().is_some() && config_valid {
                         if let Err(err) = config.save_to_path(&config_path) {
@@ -2540,6 +4242,35 @@ fn spawn_worker(
                     break;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if !active_games.is_empty()
+                        && (macro_mgr.has_active_instances()
+                            || macro_mgr.has_configured_instances())
+                    {
+                        let statuses = macro_mgr.tick(&active_games, Instant::now());
+                        let mut any_toggled = false;
+                        for st in &statuses {
+                            if st.toggled_by_hotkey {
+                                any_toggled = true;
+                                let state_str = if st.active { "INICIADA" } else { "PAUSADA" };
+                                let win_label =
+                                    st.window_title.as_deref().unwrap_or(&st.normalized_name);
+                                send_worker(
+                                    &ctx,
+                                    &worker_tx,
+                                    WorkerMsg::Log(format!(
+                                        "⌨️ [Macro] Tecla {} pressionada na janela \"{win_label}\" (PID {}): Automação {state_str} apenas nesta janela.",
+                                        key_display_label(&st.toggle_key),
+                                        st.pid
+                                    )),
+                                );
+                            }
+                        }
+                        if any_toggled || last_macro_ui_sync.elapsed() >= Duration::from_millis(100)
+                        {
+                            last_macro_ui_sync = Instant::now();
+                            send_worker(&ctx, &worker_tx, WorkerMsg::Macros(statuses));
+                        }
+                    }
                     if save_due.is_some_and(|changed_at| {
                         debounce_elapsed(changed_at, Instant::now(), Duration::from_millis(450))
                     }) && config_valid
@@ -2593,8 +4324,15 @@ fn spawn_worker(
                         }
 
                         active_game_pids = report.games.iter().map(|g| g.pid).collect();
+                        active_games = report
+                            .games
+                            .iter()
+                            .map(|g| (g.pid, g.normalized_name.clone()))
+                            .collect();
                         if !report.games.is_empty() || prev_game_count > 0 {
                             sync_tunnel(&mut tunnel_mgr, &active_game_pids, &worker_tx);
+                            let statuses = macro_mgr.tick(&active_games, Instant::now());
+                            send_worker(&ctx, &worker_tx, WorkerMsg::Macros(statuses));
                             send_worker(&ctx, &worker_tx, WorkerMsg::Report(report.clone()));
                         }
                         prev_game_count = report.games.len();
@@ -2604,6 +4342,7 @@ fn spawn_worker(
                     if save_due.is_some() && config_valid {
                         let _ = config.save_to_path(&config_path);
                     }
+                    macro_mgr.shutdown();
                     tunnel_mgr.shutdown();
                     send_worker(&ctx, &worker_tx, WorkerMsg::Stopped);
                     break;
