@@ -1,9 +1,4 @@
-//! Autonomous per-window hotkey and macro automation for monitored games.
-//!
-//! Sends keyboard and mouse messages (`WM_KEYDOWN` / `WM_KEYUP`, button clicks)
-//! directly to the target game process window (`HWND`) via `PostMessageW` so each
-//! game instance operates autonomously in the background without stealing focus
-//! or registering global system hotkeys.
+//! Per-game hotkeys and macro rules for Windows and X11.
 
 #![allow(unsafe_code)]
 
@@ -11,6 +6,21 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) const WINE_BRIDGE_MARKER: &str = "GAME_OPTIMIZER_WINE_MACRO_BRIDGE";
+
+/// Whether game macro input is available in the current desktop session.
+pub fn input_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        imp::available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cfg!(windows)
+    }
+}
 
 /// Minimum allowed interval between macro steps or key presses (ms).
 pub const MIN_MACRO_INTERVAL_MS: u64 = 10;
@@ -835,6 +845,22 @@ impl GameMacroProfile {
     }
 }
 
+/// Build a per-instance profile key so each window/instance stores its own macro profile.
+pub fn instance_profile_key(normalized_name: &str, window_title: Option<&str>, pid: u32) -> String {
+    let norm = normalized_name.trim().to_ascii_lowercase();
+    if let Some(t) = window_title {
+        let trimmed = t.trim();
+        if !trimmed.is_empty()
+            && !trimmed.eq_ignore_ascii_case(normalized_name.trim())
+            && !trimmed.eq_ignore_ascii_case(&norm)
+            && !trimmed.eq_ignore_ascii_case(&format!("{norm}.exe"))
+        {
+            return format!("{norm}::{trimmed}");
+        }
+    }
+    format!("{norm}#pid:{pid}")
+}
+
 /// Live status snapshot of macro execution for a single game window (`PID`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MacroInstanceStatus {
@@ -842,6 +868,8 @@ pub struct MacroInstanceStatus {
     pub pid: u32,
     /// Normalized game name.
     pub normalized_name: String,
+    /// Per-instance profile key (`normalized_name::window_title` or `normalized_name#pid:PID`).
+    pub profile_key: String,
     /// Detected Win32 window title for this PID, if found.
     pub window_title: Option<String>,
     /// Number of visible windows matched for this PID.
@@ -890,6 +918,7 @@ struct SequentialCursor {
 struct InstanceState {
     pid: u32,
     normalized_name: String,
+    profile_key: String,
     window_title: Option<String>,
     window_count: usize,
     active: bool,
@@ -921,19 +950,34 @@ impl MacroManager {
     }
 
     /// Update saved profiles from configuration changes.
+    /// Only updates an existing live instance if `profiles` contains its exact `inst.profile_key`,
+    /// never matching across instances by `normalized_name`.
     pub fn update_profiles(&mut self, profiles: BTreeMap<String, GameMacroProfile>) {
-        for (game_name, profile) in &profiles {
-            let clean = profile.clone().normalized();
-            for inst in self.instances.values_mut() {
-                if &inst.normalized_name == game_name {
+        for inst in self.instances.values_mut() {
+            if let Some(profile) = profiles.get(&inst.profile_key) {
+                let clean = profile.clone().normalized();
+                if inst.mode != clean.mode {
+                    Self::release_all_held_keys(inst);
+                    inst.seq = SequentialCursor::default();
                     inst.mode = clean.mode;
-                    inst.cycle_interval_ms = clean.cycle_interval_ms;
-                    inst.toggle_key = clean.toggle_key.clone();
-                    Self::sync_instance_rules(inst, clean.rules.clone());
                 }
+                inst.cycle_interval_ms = clean.cycle_interval_ms;
+                inst.toggle_key = clean.toggle_key.clone();
+                Self::sync_instance_rules(inst, clean.rules);
             }
         }
         self.profiles = profiles;
+        for inst in self.instances.values() {
+            self.profiles
+                .entry(inst.profile_key.clone())
+                .or_insert_with(|| GameMacroProfile {
+                    auto_start: inst.active,
+                    mode: inst.mode,
+                    cycle_interval_ms: inst.cycle_interval_ms,
+                    toggle_key: inst.toggle_key.clone(),
+                    rules: inst.rules.clone(),
+                });
+        }
     }
 
     /// Return true if any monitored game instance currently has active macros.
@@ -957,16 +1001,12 @@ impl MacroManager {
         normalized_name: &str,
         active: bool,
     ) -> MacroInstanceStatus {
-        let profile = self
-            .profiles
-            .get(normalized_name)
-            .cloned()
-            .unwrap_or_default()
-            .normalized();
+        self.ensure_instance(pid, normalized_name);
+        self.refresh_instance_window_metadata(pid);
         let inst = self
             .instances
-            .entry(pid)
-            .or_insert_with(|| Self::new_instance(pid, normalized_name, &profile));
+            .get_mut(&pid)
+            .expect("instance entry ensured");
         if !active && inst.active {
             Self::release_all_held_keys(inst);
             inst.seq = SequentialCursor::default();
@@ -977,7 +1017,6 @@ impl MacroManager {
             inst.seq = SequentialCursor::default();
         }
         inst.active = active;
-        Self::refresh_window_metadata(inst);
         Self::status_from_instance(inst, Instant::now())
     }
 
@@ -1005,57 +1044,49 @@ impl MacroManager {
             } else {
                 DEFAULT_TOGGLE_KEY.to_string()
             };
-        let profile = self
-            .profiles
-            .entry(normalized_name.to_string())
-            .or_default();
+
+        self.ensure_instance(pid, normalized_name);
+        self.refresh_instance_window_metadata(pid);
+        let profile_key = {
+            let inst = self
+                .instances
+                .get_mut(&pid)
+                .expect("instance entry ensured");
+            if inst.mode != mode {
+                Self::release_all_held_keys(inst);
+                inst.seq = SequentialCursor::default();
+                inst.mode = mode;
+            }
+            inst.cycle_interval_ms = clean_cycle;
+            inst.toggle_key = clean_toggle.clone();
+            Self::sync_instance_rules(inst, clean.clone());
+            inst.profile_key.clone()
+        };
+
+        let profile = self.profiles.entry(profile_key).or_default();
         profile.mode = mode;
         profile.cycle_interval_ms = clean_cycle;
-        profile.toggle_key = clean_toggle.clone();
-        profile.rules = clean.clone();
+        profile.toggle_key = clean_toggle;
+        profile.rules = clean;
+    }
 
-        let auto_start = profile.auto_start;
-        let inst = self.instances.entry(pid).or_insert_with(|| {
-            Self::new_instance(
-                pid,
-                normalized_name,
-                &GameMacroProfile {
-                    auto_start,
-                    mode,
-                    cycle_interval_ms: clean_cycle,
-                    toggle_key: clean_toggle.clone(),
-                    rules: clean.clone(),
-                },
-            )
-        });
-        if inst.mode != mode {
-            Self::release_all_held_keys(inst);
-            inst.seq = SequentialCursor::default();
-            inst.mode = mode;
-        }
-        inst.cycle_interval_ms = clean_cycle;
-        inst.toggle_key = clean_toggle;
-        Self::sync_instance_rules(inst, clean);
-        Self::refresh_window_metadata(inst);
+    /// Prepare background input for a queued Linux macro test.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn prepare_background_test(&self, pid: u32) {
+        imp::prepare_background(pid);
     }
 
     /// Fire a single test pulse (`WM_KEYDOWN` followed by `WM_KEYUP`) to `pid` right now.
     pub fn test_single_key(&mut self, pid: u32, normalized_name: &str, key_code: &str) -> usize {
-        let profile = self
-            .profiles
-            .get(normalized_name)
-            .cloned()
-            .unwrap_or_default();
-        let inst = self
-            .instances
-            .entry(pid)
-            .or_insert_with(|| Self::new_instance(pid, normalized_name, &profile));
-        Self::refresh_window_metadata(inst);
+        self.ensure_instance(pid, normalized_name);
+        self.refresh_instance_window_metadata(pid);
         let sent = imp::send_key_down(pid, key_code);
         if sent > 0 {
             std::thread::sleep(Duration::from_millis(35));
             let _ = imp::send_key_up(pid, key_code);
-            inst.total_triggers = inst.total_triggers.saturating_add(1);
+            if let Some(inst) = self.instances.get_mut(&pid) {
+                inst.total_triggers = inst.total_triggers.saturating_add(1);
+            }
         }
         sent
     }
@@ -1065,6 +1096,23 @@ impl MacroManager {
         &mut self,
         active_games: &[(u32, String)],
         now: Instant,
+    ) -> Vec<MacroInstanceStatus> {
+        #[cfg(target_os = "linux")]
+        {
+            let focus = imp::sync_focus();
+            self.tick_with_window_filter(active_games, now, |pid| {
+                focus == Some(pid) || imp::prepare_background(pid)
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.tick_with_window_filter(active_games, now, |_| true)
+    }
+
+    fn tick_with_window_filter(
+        &mut self,
+        active_games: &[(u32, String)],
+        now: Instant,
+        can_send: impl Fn(u32) -> bool,
     ) -> Vec<MacroInstanceStatus> {
         let live_pids: std::collections::HashSet<u32> =
             active_games.iter().map(|(pid, _)| *pid).collect();
@@ -1082,17 +1130,12 @@ impl MacroManager {
             }
         }
 
-        // Ensure every running game has an instance entry.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        imp::retain_games(&live_pids);
+
+        // Ensure every running game has an isolated per-window instance entry.
         for (pid, norm_name) in active_games {
-            let profile = self
-                .profiles
-                .get(norm_name)
-                .cloned()
-                .unwrap_or_default()
-                .normalized();
-            self.instances
-                .entry(*pid)
-                .or_insert_with(|| Self::new_instance(*pid, norm_name, &profile));
+            self.ensure_instance(*pid, norm_name);
         }
 
         // Check if the user pressed a configured toggle key (e.g. F8) while focused on a specific game window.
@@ -1101,8 +1144,14 @@ impl MacroManager {
 
         let mut statuses = Vec::with_capacity(active_games.len());
         for (pid, _) in active_games {
+            self.refresh_instance_window_metadata(*pid);
             if let Some(inst) = self.instances.get_mut(pid) {
-                Self::refresh_window_metadata(inst);
+                if inst.active && !can_send(*pid) {
+                    Self::release_all_held_keys(inst);
+                    statuses.push(Self::status_from_instance(inst, now));
+                    inst.toggled_by_hotkey = false;
+                    continue;
+                }
                 if inst.active {
                     match inst.mode {
                         MacroExecutionMode::Sequential => Self::tick_sequential(inst, now),
@@ -1119,8 +1168,13 @@ impl MacroManager {
     fn poll_foreground_window_toggle(&mut self) {
         let mut unique_keys: Vec<String> = Vec::new();
         for inst in self.instances.values() {
-            if !inst.toggle_key.is_empty() && !unique_keys.contains(&inst.toggle_key) {
-                unique_keys.push(inst.toggle_key.clone());
+            let trimmed = inst.toggle_key.trim();
+            if !trimmed.is_empty()
+                && !unique_keys
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(trimmed))
+            {
+                unique_keys.push(trimmed.to_ascii_uppercase());
             }
         }
         if unique_keys.is_empty() {
@@ -1136,25 +1190,35 @@ impl MacroManager {
                 .unwrap_or(false);
             if is_down && !was_down {
                 if let Some(pid) = fg_pid {
-                    if let Some(inst) = self.instances.get_mut(&pid) {
-                        if inst.toggle_key.eq_ignore_ascii_case(&key_code) {
-                            if inst.active {
-                                Self::release_all_held_keys(inst);
-                                inst.seq = SequentialCursor::default();
-                                for rt in &mut inst.runtime {
-                                    rt.last_fired = None;
-                                }
-                                inst.active = false;
-                                inst.toggled_by_hotkey = true;
-                            } else if inst.rules.iter().any(MacroRule::is_ready) {
-                                inst.seq = SequentialCursor::default();
-                                inst.active = true;
-                                inst.toggled_by_hotkey = true;
-                            }
-                        }
-                    }
+                    self.toggle_instance_for_focused_pid(pid, &key_code);
                 }
             }
+        }
+    }
+
+    fn toggle_instance_for_focused_pid(&mut self, focused_pid: u32, key_code: &str) -> bool {
+        let Some(inst) = self.instances.get_mut(&focused_pid) else {
+            return false;
+        };
+        if !inst.toggle_key.eq_ignore_ascii_case(key_code) {
+            return false;
+        }
+        if inst.active {
+            Self::release_all_held_keys(inst);
+            inst.seq = SequentialCursor::default();
+            for rt in &mut inst.runtime {
+                rt.last_fired = None;
+            }
+            inst.active = false;
+            inst.toggled_by_hotkey = true;
+            true
+        } else if inst.rules.iter().any(MacroRule::is_ready) {
+            inst.seq = SequentialCursor::default();
+            inst.active = true;
+            inst.toggled_by_hotkey = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -1166,7 +1230,69 @@ impl MacroManager {
         }
     }
 
-    fn new_instance(pid: u32, normalized_name: &str, profile: &GameMacroProfile) -> InstanceState {
+    fn resolve_unique_profile_key(
+        instances: &HashMap<u32, InstanceState>,
+        pid: u32,
+        normalized_name: &str,
+        window_title: Option<&str>,
+    ) -> String {
+        let candidate_key = instance_profile_key(normalized_name, window_title, pid);
+        let conflict = instances
+            .values()
+            .any(|other| other.pid != pid && other.profile_key == candidate_key);
+        if conflict {
+            format!("{candidate_key}#pid:{pid}")
+        } else {
+            candidate_key
+        }
+    }
+
+    fn ensure_instance(&mut self, pid: u32, normalized_name: &str) {
+        if self.instances.contains_key(&pid) {
+            return;
+        }
+        let info = imp::query_process_windows(pid);
+        let profile_key = Self::resolve_unique_profile_key(
+            &self.instances,
+            pid,
+            normalized_name,
+            info.primary_title.as_deref(),
+        );
+        let norm = normalized_name.trim().to_ascii_lowercase();
+        let profile = if let Some(existing) = self.profiles.get(&profile_key) {
+            existing.clone().normalized()
+        } else {
+            let another_same_game_live = self
+                .instances
+                .values()
+                .any(|other| other.pid != pid && other.normalized_name.eq_ignore_ascii_case(&norm));
+            if !another_same_game_live {
+                if let Some(legacy) = self
+                    .profiles
+                    .remove(&norm)
+                    .or_else(|| self.profiles.remove(normalized_name.trim()))
+                {
+                    let clean = legacy.normalized();
+                    self.profiles.insert(profile_key.clone(), clean.clone());
+                    clean
+                } else {
+                    GameMacroProfile::default()
+                }
+            } else {
+                GameMacroProfile::default()
+            }
+        };
+        let inst = Self::new_instance(pid, normalized_name, profile_key, info, &profile);
+        self.instances.insert(pid, inst);
+    }
+
+    fn new_instance(
+        pid: u32,
+        normalized_name: &str,
+        profile_key: String,
+        window_info: WindowInspectResult,
+        profile: &GameMacroProfile,
+    ) -> InstanceState {
         let rules: Vec<MacroRule> = profile
             .rules
             .iter()
@@ -1174,11 +1300,12 @@ impl MacroManager {
             .map(MacroRule::normalized)
             .collect();
         let runtime = vec![RuleRuntimeState::default(); rules.len()];
-        let mut inst = InstanceState {
+        InstanceState {
             pid,
             normalized_name: normalized_name.to_string(),
-            window_title: None,
-            window_count: 0,
+            profile_key,
+            window_title: window_info.primary_title,
+            window_count: window_info.count,
             active: profile.auto_start && rules.iter().any(MacroRule::is_ready),
             mode: profile.mode,
             cycle_interval_ms: if profile.cycle_interval_ms == 0 {
@@ -1194,9 +1321,47 @@ impl MacroManager {
             rules,
             runtime,
             total_triggers: 0,
+        }
+    }
+
+    fn refresh_instance_window_metadata(&mut self, pid: u32) {
+        let info = imp::query_process_windows(pid);
+        let Some((normalized_name, old_key)) = self
+            .instances
+            .get(&pid)
+            .map(|inst| (inst.normalized_name.clone(), inst.profile_key.clone()))
+        else {
+            return;
         };
-        Self::refresh_window_metadata(&mut inst);
-        inst
+        let new_key = Self::resolve_unique_profile_key(
+            &self.instances,
+            pid,
+            &normalized_name,
+            info.primary_title.as_deref(),
+        );
+        if let Some(inst) = self.instances.get_mut(&pid) {
+            inst.window_count = info.count;
+            inst.window_title = info.primary_title;
+            if new_key != old_key {
+                inst.profile_key = new_key.clone();
+                if inst.rules.is_empty() {
+                    if let Some(saved) = self.profiles.get(&new_key).cloned() {
+                        let clean = saved.normalized();
+                        inst.mode = clean.mode;
+                        inst.cycle_interval_ms = clean.cycle_interval_ms;
+                        inst.toggle_key = clean.toggle_key;
+                        Self::sync_instance_rules(inst, clean.rules);
+                        if clean.auto_start && inst.rules.iter().any(MacroRule::is_ready) {
+                            inst.active = true;
+                        }
+                    }
+                } else if !self.profiles.contains_key(&new_key) {
+                    if let Some(old_prof) = self.profiles.remove(&old_key) {
+                        self.profiles.insert(new_key, old_prof);
+                    }
+                }
+            }
+        }
     }
 
     fn sync_instance_rules(inst: &mut InstanceState, new_rules: Vec<MacroRule>) {
@@ -1357,12 +1522,6 @@ impl MacroManager {
         }
     }
 
-    fn refresh_window_metadata(inst: &mut InstanceState) {
-        let info = imp::inspect_process_windows(inst.pid);
-        inst.window_count = info.count;
-        inst.window_title = info.primary_title;
-    }
-
     fn status_from_instance(inst: &InstanceState, now: Instant) -> MacroInstanceStatus {
         let last_step_highlight_done = inst
             .seq
@@ -1386,6 +1545,7 @@ impl MacroManager {
         MacroInstanceStatus {
             pid: inst.pid,
             normalized_name: inst.normalized_name.clone(),
+            profile_key: inst.profile_key.clone(),
             window_title: inst.window_title.clone(),
             window_count: inst.window_count,
             active: inst.active,
@@ -1402,7 +1562,7 @@ impl MacroManager {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct WindowInspectResult {
     count: usize,
     primary_title: Option<String>,
@@ -1503,6 +1663,10 @@ mod imp {
             );
         }
         ctx
+    }
+
+    pub(super) fn query_process_windows(pid: u32) -> WindowInspectResult {
+        inspect_process_windows(pid)
     }
 
     pub(super) fn inspect_process_windows(pid: u32) -> WindowInspectResult {
@@ -1606,7 +1770,11 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+#[path = "macros/linux.rs"]
+mod imp;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use super::WindowInspectResult;
 
@@ -1616,6 +1784,10 @@ mod imp {
 
     pub(super) fn is_key_physically_down(_key_code: &str) -> bool {
         false
+    }
+
+    pub(super) fn query_process_windows(pid: u32) -> WindowInspectResult {
+        inspect_process_windows(pid)
     }
 
     pub(super) fn inspect_process_windows(_pid: u32) -> WindowInspectResult {
@@ -1716,25 +1888,164 @@ mod tests {
 
         let mut mgr = MacroManager::new(profiles);
         let t0 = Instant::now();
-        let st0 = mgr.tick(&[(1001, "mir4g".into())], t0);
+        let st0 = mgr.tick_with_window_filter(&[(1001, "mir4g".into())], t0, |_| true);
         assert_eq!(st0[0].current_step_index, Some(0));
 
         // After 55ms, step 0's 50ms delay has elapsed and it advances to step 1
-        let st1 = mgr.tick(&[(1001, "mir4g".into())], t0 + Duration::from_millis(55));
+        let st1 = mgr.tick_with_window_filter(
+            &[(1001, "mir4g".into())],
+            t0 + Duration::from_millis(55),
+            |_| true,
+        );
         assert_eq!(st1[0].current_step_index, Some(1));
 
         // After another 55ms (t=110ms), step 1's 50ms delay has elapsed and it advances to step 2 (last step)
-        let st2 = mgr.tick(&[(1001, "mir4g".into())], t0 + Duration::from_millis(110));
+        let st2 = mgr.tick_with_window_filter(
+            &[(1001, "mir4g".into())],
+            t0 + Duration::from_millis(110),
+            |_| true,
+        );
         assert_eq!(st2[0].current_step_index, Some(2));
 
         // At t=500ms, step 2 has finished holding, and the sequence is waiting for the 5000ms cycle_interval_ms
-        let st_wait = mgr.tick(&[(1001, "mir4g".into())], t0 + Duration::from_millis(500));
+        let st_wait = mgr.tick_with_window_filter(
+            &[(1001, "mir4g".into())],
+            t0 + Duration::from_millis(500),
+            |_| true,
+        );
         assert!(st_wait[0].waiting_for_next_cycle);
         assert_eq!(st_wait[0].current_step_index, None);
 
         // After 5000ms from step 2 (t=5120ms), the next cycle triggers from step 0!
-        let st3 = mgr.tick(&[(1001, "mir4g".into())], t0 + Duration::from_millis(5120));
+        let st3 = mgr.tick_with_window_filter(
+            &[(1001, "mir4g".into())],
+            t0 + Duration::from_millis(5120),
+            |_| true,
+        );
         assert!(!st3[0].waiting_for_next_cycle);
         assert_eq!(st3[0].current_step_index, Some(0));
+    }
+
+    #[test]
+    fn instance_profile_key_uses_distinct_window_title_or_pid_fallback() {
+        assert_eq!(
+            instance_profile_key("Mir4G", Some("Mir4G[1]"), 101),
+            "mir4g::Mir4G[1]"
+        );
+        assert_eq!(
+            instance_profile_key("Mir4G", Some("Mir4G[2]"), 202),
+            "mir4g::Mir4G[2]"
+        );
+        assert_eq!(
+            instance_profile_key("mir4g", Some("mir4g"), 101),
+            "mir4g#pid:101"
+        );
+        assert_eq!(
+            instance_profile_key("mir4g", Some("Mir4G.exe"), 101),
+            "mir4g#pid:101"
+        );
+        assert_eq!(instance_profile_key("mir4g", None, 101), "mir4g#pid:101");
+        assert_eq!(
+            instance_profile_key("Albion-Online", None, 303),
+            "albion-online#pid:303"
+        );
+    }
+
+    #[test]
+    fn instances_of_same_and_different_games_keep_isolated_rules_state_and_toggle() {
+        let mut mgr = MacroManager::new(BTreeMap::new());
+        let active_games = vec![
+            (101, "mir4g".to_string()),
+            (202, "mir4g".to_string()),
+            (303, "Albion-Online".to_string()),
+        ];
+        let t0 = Instant::now();
+        let initial = mgr.tick(&active_games, t0);
+        assert_eq!(initial.len(), 3);
+        assert_ne!(initial[0].profile_key, initial[1].profile_key);
+        assert_ne!(initial[0].profile_key, initial[2].profile_key);
+
+        // Configure rules on PID 101 (Mir4G window 1) only
+        mgr.set_instance_rules(
+            101,
+            "mir4g",
+            MacroExecutionMode::Sequential,
+            3000,
+            "F8".to_string(),
+            vec![MacroRule {
+                label: "Skill 1".into(),
+                key: "F1".into(),
+                interval_ms: 60,
+                hold_ms: 15,
+                enabled: true,
+            }],
+        );
+
+        // Configure different rules on PID 303 (Albion-Online) with toggle key F9
+        mgr.set_instance_rules(
+            303,
+            "Albion-Online",
+            MacroExecutionMode::Parallel,
+            1500,
+            "F9".to_string(),
+            vec![MacroRule {
+                label: "Mount".into(),
+                key: "A".into(),
+                interval_ms: 80,
+                hold_ms: 20,
+                enabled: true,
+            }],
+        );
+
+        let after_rules = mgr.tick(&active_games, t0 + Duration::from_millis(10));
+        let st_101 = after_rules.iter().find(|s| s.pid == 101).unwrap();
+        let st_202 = after_rules.iter().find(|s| s.pid == 202).unwrap();
+        let st_303 = after_rules.iter().find(|s| s.pid == 303).unwrap();
+
+        // PID 101 has its F1 rule; PID 202 (second Mir4G window) must have 0 rules; PID 303 has its A rule
+        assert_eq!(st_101.rules.len(), 1);
+        assert_eq!(st_101.rules[0].key, "F1");
+        assert_eq!(st_101.toggle_key, "F8");
+        assert!(st_202.rules.is_empty());
+        assert!(!st_202.active);
+        assert_eq!(st_303.rules.len(), 1);
+        assert_eq!(st_303.rules[0].key, "A");
+        assert_eq!(st_303.toggle_key, "F9");
+        assert_eq!(st_303.mode, MacroExecutionMode::Parallel);
+
+        // Calling update_profiles with a legacy shared key or another instance's key must NEVER overwrite PID 202 or PID 101
+        let mut updated_map = BTreeMap::new();
+        updated_map.insert(
+            st_101.profile_key.clone(),
+            GameMacroProfile {
+                auto_start: false,
+                mode: MacroExecutionMode::Sequential,
+                cycle_interval_ms: 4200,
+                toggle_key: "F8".to_string(),
+                rules: st_101.rules.clone(),
+            },
+        );
+        mgr.update_profiles(updated_map);
+
+        let after_update = mgr.tick(&active_games, t0 + Duration::from_millis(20));
+        let st_101 = after_update.iter().find(|s| s.pid == 101).unwrap();
+        let st_202 = after_update.iter().find(|s| s.pid == 202).unwrap();
+        let st_303 = after_update.iter().find(|s| s.pid == 303).unwrap();
+        assert_eq!(st_101.cycle_interval_ms, 4200);
+        assert!(st_202.rules.is_empty());
+        assert_eq!(st_303.rules.len(), 1);
+        assert_eq!(st_303.rules[0].key, "A");
+
+        // Pressing F8 while focused on PID 101 toggles ONLY PID 101
+        assert!(mgr.toggle_instance_for_focused_pid(101, "F8"));
+        let after_toggle = mgr.tick(&active_games, t0 + Duration::from_millis(30));
+        let st_101 = after_toggle.iter().find(|s| s.pid == 101).unwrap();
+        let st_202 = after_toggle.iter().find(|s| s.pid == 202).unwrap();
+        let st_303 = after_toggle.iter().find(|s| s.pid == 303).unwrap();
+        assert!(st_101.active);
+        assert!(st_101.toggled_by_hotkey);
+        assert_eq!(st_101.current_step_index, Some(0));
+        assert!(!st_202.active);
+        assert!(!st_303.active);
     }
 }

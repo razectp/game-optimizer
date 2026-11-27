@@ -93,10 +93,7 @@ pub fn is_unsafe_cache_root(path: &Path) -> bool {
         return true;
     }
     let under_appdata = s.contains("\\appdata\\");
-    if !under_appdata && (s.ends_with("\\windows") || s.contains("\\windows\\")) {
-        return true;
-    }
-    false
+    !under_appdata && (s.ends_with("\\windows") || s.contains("\\windows\\"))
 }
 
 /// True when `path` is a standard user temp/cache root we are willing to clean.
@@ -160,18 +157,15 @@ pub fn clean_directory(root: &Path) -> CacheCleanReport {
 }
 
 fn is_link_or_reparse(meta: &fs::Metadata) -> bool {
-    if meta.file_type().is_symlink() {
-        return true;
-    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     {
-        false
+        meta.file_type().is_symlink()
     }
 }
 

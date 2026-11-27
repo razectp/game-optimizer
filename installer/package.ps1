@@ -24,6 +24,7 @@ if (-not $Root) { $Root = $ScriptDir }
 $Version = ([regex]::Match((Get-Content -LiteralPath (Join-Path $Root "Cargo.toml") -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value)
 if (-not $Version) { throw "Could not read package version from Cargo.toml" }
 $ExeName = "game_optimizer.exe"
+$LauncherExeName = "game_optimizer_launcher.exe"
 $BuildDir = Join-Path $Root "target\package"
 $ReleaseDir = Join-Path $BuildDir "release"
 $CargoToml = Join-Path $Root "Cargo.toml"
@@ -50,12 +51,17 @@ $ReleaseExe = Join-Path $ReleaseDir $ExeName
 if (-not (Test-Path -LiteralPath $ReleaseExe)) {
     throw "Missing $ReleaseExe after cargo build --release"
 }
+$ReleaseLauncherExe = Join-Path $ReleaseDir $LauncherExeName
+if (-not (Test-Path -LiteralPath $ReleaseLauncherExe)) {
+    throw "Missing $ReleaseLauncherExe after cargo build --release"
+}
 $DistRoot = Join-Path $Root "dist"
 $StageDir = Join-Path $DistRoot "GameOptimizer"
 New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 
 $Payload = [ordered]@{
     $ExeName = $ReleaseExe
+    $LauncherExeName = $ReleaseLauncherExe
     "wintun.dll" = $WintunSource
     "install.ps1" = Join-Path $ScriptDir "install.ps1"
     "uninstall.ps1" = Join-Path $ScriptDir "uninstall.ps1"

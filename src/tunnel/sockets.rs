@@ -13,20 +13,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
 };
 use windows::Win32::Networking::WinSock::AF_INET;
 
-/// An active network connection owned by a monitored game PID.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProcessConnection {
-    /// Owning OS process ID.
-    pub pid: u32,
-    /// Protocol used (TCP or UDP).
-    pub protocol: &'static str,
-    /// Local bound port.
-    pub local_port: u16,
-    /// Remote IPv4 address.
-    pub remote_ip: Ipv4Addr,
-    /// Remote port.
-    pub remote_port: u16,
-}
+pub use super::ProcessConnection;
 
 #[repr(C)]
 struct MibTcpRowOwnerPid {

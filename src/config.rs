@@ -71,8 +71,8 @@ impl Default for GuiPreferences {
         Self {
             watch_interval_secs: 45,
             watch_enabled: false,
-            window_width: 880,
-            window_height: 560,
+            window_width: 1040,
+            window_height: 680,
             window_maximized: false,
         }
     }
@@ -113,7 +113,7 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Return the standard path in user's profile `%LOCALAPPDATA%\GameOptimizer\config.toml`.
+    /// Return the standard configuration path for the current user.
     pub fn user_config_path() -> PathBuf {
         crate::autostart::data_dir().join("config.toml")
     }
@@ -172,7 +172,7 @@ impl AppConfig {
         Ok(Self::default())
     }
 
-    /// Save configuration directly to `%LOCALAPPDATA%\GameOptimizer\config.toml`.
+    /// Save configuration to the standard path for the current user.
     pub fn save_to_user_dir(&self) -> anyhow::Result<PathBuf> {
         let target = Self::user_config_path();
         self.save_to_path(&target)?;
@@ -325,7 +325,7 @@ impl AppConfig {
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn atomic_write(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -343,11 +343,14 @@ fn atomic_write(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
             std::process::id(),
             id
         ));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
             Ok(created) => {
                 temp_path = Some(candidate);
                 file = Some(created);

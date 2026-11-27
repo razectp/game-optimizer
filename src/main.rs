@@ -29,6 +29,11 @@ struct Cli {
     #[arg(long)]
     gui: bool,
 
+    /// Start with the window hidden when a Linux tray is available.
+    #[cfg(target_os = "linux")]
+    #[arg(long)]
+    start_in_tray: bool,
+
     /// Open the first-run setup wizard in the GUI.
     #[arg(long)]
     setup: bool,
@@ -39,9 +44,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    TunnelHelper,
     /// List detected games and planned actions without changing anything.
     Scan,
     /// Apply GPC optimizations to games only.
+    #[cfg_attr(target_os = "linux", command(about = "List detected games."))]
     Optimize {
         /// Plan actions but do not call Windows APIs.
         #[arg(long)]
@@ -51,6 +60,10 @@ enum Commands {
         trim_game_memory: bool,
     },
     /// Re-apply game-only optimizations on an interval while games stay open.
+    #[cfg_attr(
+        target_os = "linux",
+        command(about = "List detected games at regular intervals.")
+    )]
     Watch {
         /// Seconds between passes.
         #[arg(long, default_value_t = 45)]
@@ -64,7 +77,7 @@ enum Commands {
     },
     /// Print the effective game allowlist.
     Games,
-    /// Enable or disable start-with-Windows (Registry Run key).
+    /// Enable or disable launch at sign-in.
     Autostart {
         /// Turn auto-start on.
         #[arg(long, conflicts_with = "off")]
@@ -73,8 +86,12 @@ enum Commands {
         #[arg(long)]
         off: bool,
     },
-    /// Manage and inspect the embedded WireGuard VPS game tunnel.
+    /// Manage and inspect the WireGuard VPS game tunnel.
     Tunnel {
+        /// Run the Linux game tunnel until Ctrl+C.
+        #[cfg(target_os = "linux")]
+        #[arg(long, conflicts_with_all = ["ping", "export_conf"])]
+        watch: bool,
         /// Test latency to the VPS endpoint.
         #[arg(long)]
         ping: bool,
@@ -94,6 +111,10 @@ fn apply_cli_overrides(mut config: AppConfig, trim_game_memory: bool) -> AppConf
 fn main() -> anyhow::Result<()> {
     attach_parent_console();
     let cli = Cli::parse();
+    #[cfg(target_os = "linux")]
+    if matches!(cli.command, Some(Commands::TunnelHelper)) {
+        return game_optimizer::tunnel::run_gui_tunnel_helper();
+    }
 
     #[cfg(windows)]
     game_optimizer::win_process::require_administrator()?;
@@ -103,12 +124,17 @@ fn main() -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(AppConfig::user_config_path);
 
-    if cli.setup || cli.gui || cli.command.is_none() {
+    #[cfg(target_os = "linux")]
+    let start_in_tray = cli.start_in_tray;
+    #[cfg(not(target_os = "linux"))]
+    let start_in_tray = false;
+    if cli.setup || cli.gui || start_in_tray || cli.command.is_none() {
         if !win_window::try_become_single_instance() {
             let _ = win_window::restore_main_window(false);
             return Ok(());
         }
-        return gui::run(config_path).map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
+        return gui::run_with_tray_start(config_path, start_in_tray)
+            .map_err(|err| anyhow::anyhow!("GUI failed: {err}"));
     }
 
     let config = if let Some(path) = &cli.config {
@@ -121,6 +147,8 @@ fn main() -> anyhow::Result<()> {
         .expect("subcommand present when not launching GUI");
 
     match command {
+        #[cfg(target_os = "linux")]
+        Commands::TunnelHelper => unreachable!("handled before loading user configuration"),
         Commands::Scan => {
             let report = optimize_system(&OptimizeRequest {
                 config,
@@ -184,7 +212,16 @@ fn main() -> anyhow::Result<()> {
             autostart::set_enabled(on)?;
             println!("Auto-start {}", if on { "enabled" } else { "disabled" });
         }
-        Commands::Tunnel { ping, export_conf } => {
+        Commands::Tunnel {
+            ping,
+            export_conf,
+            #[cfg(target_os = "linux")]
+            watch,
+        } => {
+            #[cfg(target_os = "linux")]
+            if watch {
+                return game_optimizer::tunnel::watch_tunnel(config);
+            }
             let wg = &config.wireguard;
             println!("=== Tunelamento WireGuard (VPS) ===");
             println!(

@@ -149,7 +149,7 @@ Write-Host "Atalhos removidos (se existiam)."
 if (Test-Path -LiteralPath $InstallDir) {
     # Remove only files owned by the application. Keep config.toml, games.toml,
     # user lists/settings, and any unrelated files in the profile/install folder.
-    foreach ($ownedFile in @("game_optimizer.exe", "wintun.dll", "uninstall.ps1", "install.ps1", "icon.ico", ".autostart-initialized", ".setup-wizard-complete")) {
+    foreach ($ownedFile in @("game_optimizer.exe", "game_optimizer_launcher.exe", "wintun.dll", "uninstall.ps1", "install.ps1", "icon.ico", ".autostart-initialized", ".setup-wizard-complete")) {
         Remove-ItemIfExists -Path (Join-Path $InstallDir $ownedFile)
     }
     # Directory.Delete(false) refuses a nonempty directory without prompting

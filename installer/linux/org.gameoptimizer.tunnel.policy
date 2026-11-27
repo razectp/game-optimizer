@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Game Optimizer</vendor>
+  <action id="org.gameoptimizer.tunnel">
+    <description>Configure the Game Optimizer tunnel</description>
+    <description xml:lang="pt_BR">Configurar o túnel do Game Optimizer</description>
+    <message>Administrator authorization is required to configure the game tunnel.</message>
+    <message xml:lang="pt_BR">Autorize a configuração de rede para iniciar o túnel dos jogos.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/game-optimizer/tunnel-helper</annotate>
+  </action>
+</policyconfig>

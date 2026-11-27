@@ -152,6 +152,18 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
     pub_arr.copy_from_slice(&pub_bytes[..32]);
     let peer_public = x25519_dalek::PublicKey::from(pub_arr);
 
+    let preshared_key = config
+        .preshared_key
+        .as_deref()
+        .map(|key| {
+            base64::engine::general_purpose::STANDARD
+                .decode(key.trim())
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| "Chave pré-compartilhada do WireGuard inválida.".to_string())
+        })
+        .transpose()?;
+
     // Initialize Wintun
     let wintun_path = find_wintun_dll()?;
     let wintun = unsafe { wintun::load_from_path(&wintun_path) }
@@ -227,7 +239,7 @@ pub fn start_embedded_tunnel(config: &WireGuardConfig) -> Result<EmbeddedTunnelH
     let tunn = Arc::new(std::sync::Mutex::new(Tunn::new(
         static_private,
         peer_public,
-        None,
+        preshared_key,
         Some(keepalive_val),
         0,
         None,

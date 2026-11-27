@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, Process, ProcessesToUpdate, System};
+#[cfg(target_os = "linux")]
+use sysinfo::{ProcessRefreshKind, UpdateKind};
 
 use crate::config::{game_path_markers, normalize_process_name, AppConfig};
 
@@ -61,8 +63,7 @@ pub struct RunningProcessInfo {
 
 /// Enumerate all non-system running processes with root process tree detection.
 pub fn list_running_processes(config: &AppConfig) -> Vec<RunningProcessInfo> {
-    let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::All, true);
+    let system = scan_system();
     let self_pid = std::process::id();
 
     let mut result = Vec::new();
@@ -73,7 +74,7 @@ pub fn list_running_processes(config: &AppConfig) -> Vec<RunningProcessInfo> {
             continue;
         }
 
-        let name = process.name().to_string_lossy().into_owned();
+        let (name, exe_path) = process_identity(process);
         let normalized = normalize_process_name(&name);
 
         if is_protected_name(&normalized) {
@@ -81,7 +82,6 @@ pub fn list_running_processes(config: &AppConfig) -> Vec<RunningProcessInfo> {
         }
 
         let memory_bytes = process.memory();
-        let exe_path = process.exe().map(|p| p.to_string_lossy().into_owned());
         let parent_pid = process.parent().map(pid_as_u32);
 
         // Walk up parent tree to find root process
@@ -95,11 +95,11 @@ pub fn list_running_processes(config: &AppConfig) -> Vec<RunningProcessInfo> {
                 break;
             }
             if let Some(parent_proc) = system.process(parent_p) {
-                let p_norm = normalize_process_name(&parent_proc.name().to_string_lossy());
+                let p_norm = normalize_process_name(&process_identity(parent_proc).0);
                 if is_protected_name(&p_norm) || is_launcher_name(&p_norm) {
                     root_pid = pid_as_u32(curr_pid);
                     if let Some(cp) = system.process(curr_pid) {
-                        root_name = normalize_process_name(&cp.name().to_string_lossy());
+                        root_name = normalize_process_name(&process_identity(cp).0);
                     }
                     break;
                 }
@@ -112,7 +112,7 @@ pub fn list_running_processes(config: &AppConfig) -> Vec<RunningProcessInfo> {
         }
 
         let is_game = is_game(config, &normalized, exe_path.as_deref().map(Path::new))
-            || config.game_names.contains(&root_name);
+            || (cfg!(windows) && config.game_names.contains(&root_name));
 
         result.push(RunningProcessInfo {
             pid: pid_u32,
@@ -136,6 +136,18 @@ pub fn is_launcher_name(name: &str) -> bool {
     matches!(
         name,
         "steam"
+            | "steam-runtime-launcher-service"
+            | "proton"
+            | "wineserver"
+            | "wineserver64"
+            | "wine"
+            | "wine64"
+            | "wine-preloader"
+            | "wine64-preloader"
+            | "pressure-vessel-wrap"
+            | "steam-launch-wrapper"
+            | "systemd"
+            | "systemd-run"
             | "steamwebhelper"
             | "steamservice"
             | "epicgameslauncher"
@@ -153,18 +165,16 @@ pub fn is_launcher_name(name: &str) -> bool {
 
 /// Collect and classify all processes using `config`.
 pub fn snapshot_processes(config: &AppConfig) -> Vec<ProcessSnapshot> {
-    let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::All, true);
+    let system = scan_system();
 
     let self_pid = std::process::id();
     let mut out = Vec::new();
 
     for (pid, process) in system.processes() {
         let pid_u32 = pid_as_u32(*pid);
-        let name = process.name().to_string_lossy().into_owned();
+        let (name, exe_path) = process_identity(process);
         let normalized = normalize_process_name(&name);
         let memory_bytes = process.memory();
-        let exe_path = process.exe().map(|p| p.to_string_lossy().into_owned());
 
         let class = classify_process(
             config,
@@ -187,6 +197,23 @@ pub fn snapshot_processes(config: &AppConfig) -> Vec<ProcessSnapshot> {
 
     out.sort_by_key(|a| std::cmp::Reverse(a.memory_bytes));
     out
+}
+
+fn scan_system() -> System {
+    let mut system = System::new();
+    #[cfg(target_os = "linux")]
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .without_tasks()
+            .with_memory()
+            .with_exe(UpdateKind::OnlyIfNotSet)
+            .with_cmd(UpdateKind::OnlyIfNotSet),
+    );
+    #[cfg(not(target_os = "linux"))]
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    system
 }
 
 /// Classify a single process from discrete fields (unit-test friendly).
@@ -225,11 +252,27 @@ fn is_game(config: &AppConfig, normalized_name: &str, exe_path: Option<&Path>) -
     if is_helper_tool(normalized_name) {
         return false;
     }
+    #[cfg(target_os = "linux")]
+    if is_launcher_name(normalized_name)
+        || matches!(
+            normalized_name,
+            "start" | "wineboot" | "winedevice" | "explorer" | "mir4launcher"
+        )
+    {
+        return false;
+    }
     if config.game_names.contains(normalized_name) {
         return true;
     }
     if let Some(path) = exe_path {
-        let lower = path.to_string_lossy().to_lowercase();
+        let lower = path.to_string_lossy().to_lowercase().replace('/', "\\");
+        #[cfg(target_os = "linux")]
+        if let Some((_, library_path)) = lower.split_once(r"\steamapps\common\") {
+            let directory = library_path.split('\\').next().unwrap_or_default();
+            return !(directory.starts_with("proton ")
+                || directory.starts_with("steamlinuxruntime")
+                || directory == "steamworks shared");
+        }
         if game_path_markers()
             .iter()
             .any(|marker| lower.contains(marker))
@@ -251,6 +294,27 @@ fn is_game(config: &AppConfig, normalized_name: &str, exe_path: Option<&Path>) -
         }
     }
     false
+}
+
+fn process_identity(process: &Process) -> (String, Option<String>) {
+    let name = process.name().to_string_lossy().into_owned();
+    #[cfg(target_os = "linux")]
+    if let Some(argv0) = process.cmd().first() {
+        if let Some(executable) = proton_executable(&argv0.to_string_lossy()) {
+            return executable;
+        }
+    }
+    let path = process.exe().map(|p| p.to_string_lossy().into_owned());
+    (name, path)
+}
+
+#[cfg(target_os = "linux")]
+fn proton_executable(argv0: &str) -> Option<(String, Option<String>)> {
+    let name = argv0.rsplit(['/', '\\']).next()?;
+    if !name.to_ascii_lowercase().ends_with(".exe") {
+        return None;
+    }
+    Some((name.to_owned(), Some(argv0.to_owned())))
 }
 
 /// Encoders and crash helpers must never be treated as games or trim targets.
@@ -415,5 +479,86 @@ mod tests {
         let path = Path::new(r"C:\Program Files (x86)\Steam\steam.exe");
         let class = classify_process(&cfg(), 1, 10, "steam", 300 * 1024 * 1024, Some(path));
         assert_ne!(class, ProcessClass::Game);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proton_uses_the_windows_image_name_from_argv0() {
+        for executable in [
+            r"Z:\home\player\Steam Library\steamapps\common\MIR4\Mir4G.EXE",
+            "/home/player/.steam/steam/steamapps/common/MIR4/Mir4G.exe",
+            "Mir4G.exe",
+        ] {
+            let (name, path) = proton_executable(executable).unwrap();
+            assert!(is_game(
+                &cfg(),
+                &normalize_process_name(&name),
+                path.as_deref().map(Path::new),
+            ));
+        }
+        assert!(proton_executable("/opt/Proton/proton").is_none());
+        assert!(proton_executable("/opt/Proton/files/bin/wine64-preloader").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn alternate_steam_libraries_are_detected_without_counting_proton() {
+        let library = Path::new("/games/SteamLibrary/steamapps/common");
+        assert!(is_game(
+            &cfg(),
+            "client-win64-shipping",
+            Some(&library.join("Example/Client-Win64-Shipping.exe")),
+        ));
+        assert!(!is_game(
+            &cfg(),
+            "wine64",
+            Some(&library.join("Proton/files/bin/wine64")),
+        ));
+        assert!(!is_game(
+            &cfg(),
+            "pv-bwrap",
+            Some(&library.join("SteamLinuxRuntime_sniper/pressure-vessel/bin/pv-bwrap")),
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scanning_linux_omits_worker_threads() {
+        std::thread::spawn(|| {
+            let thread_path = std::fs::read_link("/proc/thread-self").unwrap();
+            let tid: u32 = thread_path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let pid = std::process::id();
+
+            let system = scan_system();
+            assert!(system.process(Pid::from_u32(pid)).is_some());
+            assert!(system.process(Pid::from_u32(tid)).is_none());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scanning_a_live_process_uses_its_windows_command_name() {
+        use std::os::unix::process::CommandExt;
+        let mut process = std::process::Command::new("/bin/sleep")
+            .arg0(r"Z:\Steam Library\steamapps\common\MIR4\Mir4G.exe")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        let processes = snapshot_processes(&cfg());
+        let _ = process.kill();
+        process.wait().unwrap();
+        assert!(processes.iter().any(|entry| {
+            entry.pid == process.id()
+                && entry.normalized_name == "mir4g"
+                && entry.class == ProcessClass::Game
+        }));
     }
 }

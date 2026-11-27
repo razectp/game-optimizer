@@ -12,6 +12,11 @@ pub fn format_mib(bytes: u64) -> String {
 pub fn render_report(report: &OptimizeReport) -> String {
     let mut lines = Vec::new();
     lines.push(String::from("=== Game Optimizer (GPC) ==="));
+    #[cfg(target_os = "linux")]
+    lines.push(String::from(
+        "Linux game detection (priority managed by the OS)",
+    ));
+    #[cfg(not(target_os = "linux"))]
     lines.push(String::from(
         "Scope: GPC on games + optional WS trim for browsers only",
     ));
@@ -36,6 +41,7 @@ pub fn render_report(report: &OptimizeReport) -> String {
         }
     }
 
+    #[cfg(not(target_os = "linux"))]
     if !report.contracts.is_empty() {
         lines.push(String::new());
         lines.push(String::from("GPC session contracts:"));
@@ -51,18 +57,21 @@ pub fn render_report(report: &OptimizeReport) -> String {
         }
     }
 
-    lines.push(String::new());
-    lines.push(format!(
-        "Browser reclaim candidates: {}",
-        report.reclaim_candidates.len()
-    ));
-    for proc in report.reclaim_candidates.iter().take(12) {
+    #[cfg(not(target_os = "linux"))]
+    {
+        lines.push(String::new());
         lines.push(format!(
-            "  pid={:<6} {:<24} {}",
-            proc.pid,
-            proc.name,
-            format_mib(proc.memory_bytes)
+            "Browser reclaim candidates: {}",
+            report.reclaim_candidates.len()
         ));
+        for proc in report.reclaim_candidates.iter().take(12) {
+            lines.push(format!(
+                "  pid={:<6} {:<24} {}",
+                proc.pid,
+                proc.name,
+                format_mib(proc.memory_bytes)
+            ));
+        }
     }
 
     lines.push(String::new());
@@ -79,6 +88,11 @@ pub fn render_report(report: &OptimizeReport) -> String {
     }
 
     lines.push(String::new());
+    #[cfg(target_os = "linux")]
+    lines.push(String::from(
+        "Safety: games are never closed by the optimizer.",
+    ));
+    #[cfg(not(target_os = "linux"))]
     lines.push(String::from(
         "Safety: games are never closed. Cursor/VS Code are not trimmed by default.",
     ));

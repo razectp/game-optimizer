@@ -160,6 +160,7 @@ if (-not $InstallDir) {
 }
 
 $ExeName = "game_optimizer.exe"
+$LauncherExeName = "game_optimizer_launcher.exe"
 $Version = ""
 $Publisher = "Game Optimizer"
 
@@ -219,6 +220,10 @@ if (-not $Version) { throw "Could not determine a semantic application version f
 $WintunCandidates = @((Join-Path (Split-Path -Parent $SourceExe) "wintun.dll"), (Join-Path $Root "wintun.dll"), (Join-Path $ScriptDir "wintun.dll"))
 $WintunSource = $WintunCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 if (-not $WintunSource) { throw "Required wintun.dll was not found beside the executable or package. Re-extract the complete release package." }
+$LauncherSource = Join-Path (Split-Path -Parent $SourceExe) $LauncherExeName
+if (-not (Test-Path -LiteralPath $LauncherSource -PathType Leaf)) {
+    throw "Required $LauncherExeName was not found beside $SourceExe. Re-extract the complete release package or build with -Build."
+}
 
 $UninstallSrc = Join-Path $ScriptDir "uninstall.ps1"
 if (-not (Test-Path -LiteralPath $UninstallSrc)) {
@@ -239,6 +244,7 @@ Request-CloseGameOptimizer -InstallDir $InstallDir
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $InstalledExe = Join-Path $InstallDir $ExeName
 Copy-Item -LiteralPath $SourceExe -Destination $InstalledExe -Force
+Copy-Item -LiteralPath $LauncherSource -Destination (Join-Path $InstallDir $LauncherExeName) -Force
 Copy-Item -LiteralPath $WintunSource -Destination (Join-Path $InstallDir "wintun.dll") -Force
 
 $ConfigSrc = Find-GamesToml -RootDir $Root -ScriptDir $ScriptDir -ExePath $SourceExe

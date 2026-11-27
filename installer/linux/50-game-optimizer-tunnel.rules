@@ -1,0 +1,8 @@
+polkit.addRule(function (action, subject) {
+    if (action.id === "org.gameoptimizer.tunnel" &&
+        action.lookup("program") === "/usr/lib/game-optimizer/tunnel-helper" &&
+        action.lookup("user") === "root" &&
+        subject.local && subject.active && subject.isInGroup("sudo")) {
+        return polkit.Result.YES;
+    }
+});

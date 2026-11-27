@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+[ "$#" -eq 0 ] || exit 64
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+exec /usr/lib/game-optimizer/game_optimizer tunnel-helper

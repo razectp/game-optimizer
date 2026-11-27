@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Game Optimizer
+Comment=Optimize running games and manage the game tunnel
+Comment[pt_BR]=Otimize jogos e gerencie o túnel de rede
+Exec=/usr/bin/game_optimizer --gui
+TryExec=/usr/bin/game_optimizer
+Icon=game-optimizer
+Terminal=false
+Categories=Game;
+StartupNotify=true

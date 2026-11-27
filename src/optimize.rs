@@ -249,7 +249,10 @@ pub fn optimize_system(request: &OptimizeRequest) -> OptimizeReport {
         request.config.residency_floor_percent,
         win_process::logical_processor_count(),
     );
+    #[cfg(not(target_os = "linux"))]
     let actions = plan_actions(&request.config, &contracts, &processes);
+    #[cfg(target_os = "linux")]
+    let actions: Vec<OptimizeAction> = Vec::new();
 
     let game_pids: std::collections::BTreeSet<u32> = games.iter().map(|g| g.pid).collect();
     for action in &actions {

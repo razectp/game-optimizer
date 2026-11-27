@@ -85,22 +85,34 @@ pub fn page_copy(page: usize) -> WizardPageCopy {
     match page {
         0 => WizardPageCopy {
             title: "Bem-vindo",
+            #[cfg(target_os = "linux")]
+            body: "Vamos configurar a detecção de jogos, os macros e o túnel WireGuard.",
+            #[cfg(not(target_os = "linux"))]
             body: "Vamos configurar o Game Optimizer em poucos passos. \
 Seus jogos nunca são fechados — o programa só ajusta prioridade e memória.",
         },
         1 => WizardPageCopy {
             title: "Como funciona",
+            #[cfg(target_os = "linux")]
+            body: "Detecta jogos abertos e os encaminha pelo WireGuard quando o túnel está ativo.",
+            #[cfg(not(target_os = "linux"))]
             body: "Detecta jogos abertos e aplica o contrato de desempenho. \
 Minimizar ou fechar a janela envia o app para a bandeja. \
 A limpeza da pasta Temp é opcional e nunca apaga cache de jogos.",
         },
         2 => WizardPageCopy {
             title: "Preferências",
+            #[cfg(target_os = "linux")]
+            body: "Escolha se o programa deve abrir ao entrar na sessão.",
+            #[cfg(not(target_os = "linux"))]
             body: "Escolha se o otimizador deve abrir com o Windows e se \
 já começa a cuidar dos jogos em segundo plano.",
         },
         _ => WizardPageCopy {
             title: "Tudo pronto",
+            #[cfg(target_os = "linux")]
+            body: "Toque em Concluir para abrir o painel. Você pode reabrir este assistente em Mais opções.",
+            #[cfg(not(target_os = "linux"))]
             body: "Pode otimizar quando quiser. Toque em Concluir para \
 abrir o painel. Você pode reabrir este assistente em Mais opções.",
         },

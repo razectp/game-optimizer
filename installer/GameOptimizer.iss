@@ -7,6 +7,9 @@
 #if !FileExists(PackageDir + "\\game_optimizer.exe")
   #error "Package payload missing: run installer\\package.ps1 first (game_optimizer.exe)."
 #endif
+#if !FileExists(PackageDir + "\\game_optimizer_launcher.exe")
+  #error "Package payload missing: run installer\\package.ps1 first (game_optimizer_launcher.exe)."
+#endif
 #if !FileExists(PackageDir + "\\wintun.dll")
   #error "Package payload missing required wintun.dll: run installer\\package.ps1 first."
 #endif
@@ -65,7 +68,7 @@ UninstallDisplayIcon={app}\{#AppExeName}
 UninstallDisplayName={#AppName}
 SetupIconFile=..\assets\icon.ico
 CloseApplications=yes
-CloseApplicationsFilter=game_optimizer.exe
+CloseApplicationsFilter=game_optimizer.exe,game_optimizer_launcher.exe
 RestartApplications=no
 UsedUserAreasWarning=no
 LanguageDetectionMethod=uilanguage
@@ -129,6 +132,7 @@ Name: "autostart"; Description: "{cm:StartWithWindows}"; GroupDescription: "{cm:
 
 [Files]
 Source: "{#PackageDir}\game_optimizer.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\game_optimizer_launcher.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\wintun.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\install.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\uninstall.ps1"; DestDir: "{app}"; Flags: ignoreversion

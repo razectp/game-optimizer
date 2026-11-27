@@ -27,7 +27,7 @@ jobs:
         run: |
           & .\installer\package.ps1
           if ($LASTEXITCODE -ne 0) { throw "package.ps1 failed with exit code $LASTEXITCODE" }
-          $expected = @('game_optimizer.exe', 'wintun.dll', 'install.ps1', 'uninstall.ps1', 'icon.ico') | Sort-Object
+          $expected = @('game_optimizer.exe', 'game_optimizer_launcher.exe', 'wintun.dll', 'install.ps1', 'uninstall.ps1', 'icon.ico') | Sort-Object
           $stage = Get-ChildItem 'dist\GameOptimizer' -File | Select-Object -ExpandProperty Name | Sort-Object
           if (Compare-Object $expected $stage) { throw "Staging contents do not match the allowlist: $($stage -join ', ')" }
           $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
@@ -46,3 +46,34 @@ jobs:
             $stageHash = (Get-FileHash 'dist\GameOptimizer\wintun.dll' -Algorithm SHA256).Hash
             if ($zipHash -ne $stageHash) { throw 'ZIP wintun.dll SHA-256 does not match staged DLL.' }
           } finally { $zip.Dispose() }
+
+  verify-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check --all
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked
+      - name: Build Linux package
+        run: |
+          bash -n installer/package-linux.sh installer/install-linux.sh
+          sh -n installer/linux/tunnel-helper
+          bash installer/package-linux.sh
+      - name: Verify clean Linux setup
+        run: |
+          dpkg-deb -I dist/game-optimizer_*_amd64.deb
+          dpkg-deb -c dist/game-optimizer_*_amd64.deb
+          bash installer/install-linux.sh dist/game-optimizer_*_amd64.deb
+          version=$(awk -F'"' '/^version[[:space:]]*=/ { print $2; exit }' Cargo.toml)
+          test "$(/usr/bin/game_optimizer --version)" = "game_optimizer $version"
+          test -x /usr/lib/game-optimizer/tunnel-helper
+          test -f /usr/share/applications/game-optimizer.desktop
+          test -f /usr/share/icons/hicolor/256x256/apps/game-optimizer.png
+          test -f /usr/share/polkit-1/actions/org.gameoptimizer.tunnel.policy
+          test -f /usr/share/polkit-1/rules.d/50-game-optimizer-tunnel.rules

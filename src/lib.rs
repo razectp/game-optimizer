@@ -1,4 +1,4 @@
-//! Game-only Windows performance optimizer (GPC).
+//! Game performance optimizer and WireGuard tunnel.
 //!
 //! Applies a Game Performance Contract to detected games — never terminates
 //! them. May reclaim working sets of **browsers** when configured.
@@ -12,6 +12,8 @@ pub mod config;
 pub mod contract;
 pub mod detect;
 pub mod gui;
+#[cfg(target_os = "linux")]
+mod linux_install;
 pub mod macros;
 pub mod optimize;
 pub mod report;
@@ -25,7 +27,7 @@ pub mod win_process;
 
 #[cfg(not(windows))]
 pub mod win_process {
-    //! Stub for non-Windows hosts (compile-only messaging).
+    //! Read-only process support for hosts without Windows performance actions.
     use crate::optimize::{ActionResult, OptimizeAction};
 
     /// No-op outside Windows.
@@ -36,16 +38,20 @@ pub mod win_process {
         Vec::new()
     }
 
-    /// Stub logical CPU count.
+    /// Number of logical processors available to the caller.
     pub fn logical_processor_count() -> usize {
+        #[cfg(target_os = "linux")]
+        return std::thread::available_parallelism().map_or(1, usize::from);
+
+        #[cfg(not(target_os = "linux"))]
         1
     }
 
-    /// Always fails: this tool targets Windows.
+    /// Report that the Windows action is unavailable on this platform.
     pub fn apply_action(_action: &OptimizeAction) -> ActionResult {
         ActionResult {
             ok: false,
-            detail: "game_optimizer runs on Windows only".to_string(),
+            detail: "Process performance actions are available on Windows.".into(),
         }
     }
 }
@@ -100,15 +106,21 @@ mod release_packaging {
         let iss = include_str!("../installer/GameOptimizer.iss");
         let install = include_str!("../installer/install.ps1");
         assert!(package.contains("wintun.dll"));
+        assert!(package.contains("game_optimizer_launcher.exe"));
         assert!(package.contains("refusing to create an incomplete package"));
         assert!(iss.contains("Source: \"{#PackageDir}\\wintun.dll\"; DestDir: \"{app}\""));
+        assert!(iss.contains(
+            "Source: \"{#PackageDir}\\game_optimizer_launcher.exe\"; DestDir: \"{app}\""
+        ));
         assert!(iss.contains("Package payload missing required wintun.dll"));
         assert!(package.contains("--locked --release --target-dir $BuildDir"));
         assert!(package.contains("ZipFileExtensions]::CreateEntryFromFile"));
         assert!(install.contains("Destination (Join-Path $InstallDir \"wintun.dll\")"));
+        assert!(install.contains("game_optimizer_launcher.exe"));
         let uninstall = include_str!("../installer/uninstall.ps1");
         assert!(uninstall.contains("config.toml"));
         assert!(uninstall.contains("wintun.dll"));
+        assert!(uninstall.contains("game_optimizer_launcher.exe"));
         assert!(uninstall.contains("[System.IO.Directory]::Delete($InstallDir, $false)"));
         assert!(!uninstall.contains("Remove-ItemIfExists -Path $InstallDir -Recurse"));
     }

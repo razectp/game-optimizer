@@ -5,9 +5,12 @@
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::time::Instant;
+#[cfg(windows)]
 use windows::Win32::NetworkManagement::IpHelper::{
     IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho, IP_OPTION_INFORMATION,
 };
@@ -27,6 +30,9 @@ pub struct WireGuardConfig {
     /// VPS base64 public key.
     #[serde(default)]
     pub peer_public_key: String,
+    /// Optional extra pre-shared key for the VPS peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preshared_key: Option<String>,
     /// Client IPv4 address in the tunnel, e.g. "10.0.0.2".
     #[serde(default = "default_tunnel_ip")]
     pub tunnel_ip: String,
@@ -42,7 +48,7 @@ pub struct WireGuardConfig {
     /// Persistent keepalive interval in seconds (default: 25).
     #[serde(default = "default_keepalive")]
     pub keepalive: u16,
-    /// Tunnel interface name on Windows.
+    /// Tunnel interface name.
     #[serde(default = "default_interface_name")]
     pub interface_name: String,
     /// Automatically route server connections of detected games.
@@ -84,6 +90,7 @@ impl Default for WireGuardConfig {
             endpoint: String::new(),
             private_key: String::new(),
             peer_public_key: String::new(),
+            preshared_key: None,
             tunnel_ip: default_tunnel_ip(),
             tunnel_gateway: default_tunnel_gateway(),
             dns: Some("1.1.1.1".into()),
@@ -152,6 +159,9 @@ impl WireGuardConfig {
 
         conf.push_str("[Peer]\n");
         conf.push_str(&format!("PublicKey = {}\n", self.peer_public_key.trim()));
+        if let Some(key) = &self.preshared_key {
+            conf.push_str(&format!("PresharedKey = {}\n", key.trim()));
+        }
         conf.push_str(&format!("Endpoint = {}\n", self.endpoint.trim()));
         // AllowedIPs covers the tunnel subnet plus 0.0.0.0/0 in crypto-routing,
         // but because Table = off, Windows routes are managed strictly by Game Optimizer.
@@ -169,7 +179,11 @@ impl WireGuardConfig {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&path, self.generate_conf())?;
+        let content = self.generate_conf();
+        #[cfg(unix)]
+        crate::config::atomic_write(&path, content.as_bytes()).map_err(std::io::Error::other)?;
+        #[cfg(not(unix))]
+        fs::write(&path, content)?;
         Ok(path)
     }
 
@@ -230,6 +244,7 @@ impl WireGuardConfig {
                 },
                 "peer" => match key.as_str() {
                     "publickey" => cfg.peer_public_key = val.to_string(),
+                    "presharedkey" => cfg.preshared_key = Some(val.to_string()),
                     "endpoint" => cfg.endpoint = val.to_string(),
                     "persistentkeepalive" => {
                         if let Ok(ka) = val.parse::<u16>() {
@@ -275,6 +290,7 @@ impl WireGuardConfig {
 }
 
 /// Send an ICMP echo ping to an IPv4 address and return latency in milliseconds.
+#[cfg(windows)]
 pub fn ping_ipv4(target: Ipv4Addr, timeout: Duration) -> Result<u32, String> {
     // SAFETY: IcmpCreateFile creates an ICMP echo handle in Windows.
     let handle = match unsafe { IcmpCreateFile() } {
@@ -335,6 +351,37 @@ pub fn ping_ipv4(target: Ipv4Addr, timeout: Duration) -> Result<u32, String> {
     ))
 }
 
+/// Send an ICMP echo ping using Linux iputils and return latency in milliseconds.
+#[cfg(target_os = "linux")]
+pub fn ping_ipv4(target: Ipv4Addr, timeout: Duration) -> Result<u32, String> {
+    let output = std::process::Command::new("ping")
+        .env("LC_ALL", "C")
+        .args([
+            "-4",
+            "-n",
+            "-c",
+            "1",
+            "-W",
+            &format!("{:.3}", timeout.as_secs_f64().max(0.001)),
+            &target.to_string(),
+        ])
+        .output()
+        .map_err(|err| format!("Falha ao executar ping: {err}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Sem resposta ICMP de {target}. {}", detail.trim()));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .find_map(|text| {
+            text.strip_prefix("time=")
+                .or_else(|| text.strip_prefix("time<"))
+        })
+        .and_then(|text| text.parse::<f64>().ok())
+        .map(|ms| ms.round().max(1.0) as u32)
+        .ok_or_else(|| "O ping não informou o tempo de resposta.".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +432,7 @@ mod tests {
             [Peer]
             PublicKey = c2VydmVyX3B1YmxpY19rZXlfYmFzZTY0X2Zvcl90ZXN0aW5n=
             Endpoint = 203.0.113.50:51820
+            PresharedKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
             AllowedIPs = 0.0.0.0/0
             PersistentKeepalive = 30
         "#;
@@ -405,6 +453,11 @@ mod tests {
         assert_eq!(cfg.dns, Some("1.1.1.1".to_string()));
         assert_eq!(cfg.mtu, 1380);
         assert_eq!(cfg.keepalive, 30);
+        assert_eq!(
+            cfg.preshared_key.as_deref(),
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+        );
+        assert!(cfg.generate_conf().contains("PresharedKey = "));
     }
 
     #[test]

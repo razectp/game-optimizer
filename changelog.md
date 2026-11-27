@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.6 — 2026-11-27
+
+- **Suporte nativo para Linux (Ubuntu, Linux Mint e Debian)**:
+  - Interface gráfica nativa (OpenGL via X11 e Wayland), integração com bandeja do sistema StatusNotifierItem (`ksni`) e inicialização com a sessão.
+  - Automação de teclas e macros em sessões X11 (`XTEST`) com ponte Wine/Proton em segundo plano (`wine-macro-bridge.exe`) para jogos no mesmo prefixo.
+  - Túnel WireGuard isolado por jogo via `cgroup v2`, `systemd`, `nftables` e helper autorizado via Polkit (`tunnel-helper`), com ativação/desativação por instância e reconexão automática de sessões TCP.
+  - Empacotamento Debian completo (`installer/package-linux.sh` gerando `game-optimizer_0.6.6-1_amd64.deb`) e instalador autônomo `install-linux.sh` capaz de baixar e instalar diretamente do GitHub Releases em uma instalação Linux limpa.
+- **Redesenho da Interface Gráfica (Modais Centralizados & Layout Fluido)**:
+  - Substituição das janelas internas flutuantes por modais centralizados responsivos com backdrop escurecido (`egui::Modal`) para **Macros**, **Processos & Jogos** e **Túnel VPS**, eliminando cortes e redimensionamento manual.
+  - Janela padrão ampliada para `1040×680` (mínimo `640×420`), painéis de jogos e log expansíveis, grid fluido de cards e correção da trava de rolagem em janelas estreitas.
+  - Fontes sans-serif do Linux, remoção do bloco retangular no fundo, indicadores vetoriais limpos no lugar de emojis problemáticos, feedback inline no modal do Túnel com indicador de alterações não salvas, atalho `Enter` nos campos de cadastro e confirmação em dois passos para limpar macros.
+
 ## 0.6.5 — 2026-10-28
 
 - **Automação de Hotkeys & Macros Autônomas por Janela (Multi-client/Multi-instância)**:

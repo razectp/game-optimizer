@@ -1,24 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use super::ProcessConnection;
 use std::net::Ipv4Addr;
-use std::time::{Duration, Instant};
 
-use crate::tunnel::embedded_engine::{start_embedded_tunnel, EmbeddedTunnelHandle};
-use crate::tunnel::routes::RouteManager;
-use crate::tunnel::sockets::{find_game_remote_ips, ProcessConnection};
-use crate::tunnel::wireguard::WireGuardConfig;
-
-fn snapshot_connections(
-    connections: impl IntoIterator<Item = ProcessConnection>,
-) -> HashMap<u32, Vec<ProcessConnection>> {
-    let mut snapshot = HashMap::new();
-    for connection in connections {
-        let entries: &mut Vec<ProcessConnection> = snapshot.entry(connection.pid).or_default();
-        if !entries.contains(&connection) {
-            entries.push(connection);
-        }
-    }
-    snapshot
-}
+#[cfg(target_os = "linux")]
+pub use super::linux::TunnelManager;
 
 /// Connection health of the WireGuard tunnel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +49,35 @@ pub struct TunnelPassReport {
     pub recovered: bool,
 }
 
+#[cfg(windows)]
+use crate::tunnel::embedded_engine::{start_embedded_tunnel, EmbeddedTunnelHandle};
+#[cfg(windows)]
+use crate::tunnel::routes::RouteManager;
+#[cfg(windows)]
+use crate::tunnel::sockets::find_game_remote_ips;
+#[cfg(windows)]
+use crate::tunnel::WireGuardConfig;
+#[cfg(windows)]
+use std::collections::{HashMap, HashSet};
+#[cfg(windows)]
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+fn snapshot_connections(
+    connections: impl IntoIterator<Item = ProcessConnection>,
+) -> HashMap<u32, Vec<ProcessConnection>> {
+    let mut snapshot = HashMap::new();
+    for connection in connections {
+        let entries: &mut Vec<ProcessConnection> = snapshot.entry(connection.pid).or_default();
+        if !entries.contains(&connection) {
+            entries.push(connection);
+        }
+    }
+    snapshot
+}
+
 /// The tunnel coordinator instance.
+#[cfg(windows)]
 #[derive(Debug)]
 pub struct TunnelManager {
     /// Current WireGuard configuration.
@@ -90,6 +102,7 @@ pub struct TunnelManager {
     discovered_subnets: HashSet<Ipv4Addr>,
 }
 
+#[cfg(windows)]
 impl TunnelManager {
     /// Initialize a new tunnel manager with the given config.
     pub fn new(config: WireGuardConfig) -> Self {
@@ -392,7 +405,7 @@ impl TunnelManager {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
