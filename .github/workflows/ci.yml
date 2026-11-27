@@ -48,7 +48,7 @@ jobs:
           } finally { $zip.Dispose() }
 
   verify-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -69,6 +69,9 @@ jobs:
         run: |
           dpkg-deb -I dist/game-optimizer_*_amd64.deb
           dpkg-deb -c dist/game-optimizer_*_amd64.deb
+          min_glibc=$(dpkg-deb --field dist/game-optimizer_*_amd64.deb Depends | grep -oE 'libc6 \(>= [0-9.]+\)' | grep -oE '[0-9.]+')
+          test -n "$min_glibc"
+          dpkg --compare-versions "$min_glibc" le 2.39
           bash installer/install-linux.sh dist/game-optimizer_*_amd64.deb
           version=$(awk -F'"' '/^version[[:space:]]*=/ { print $2; exit }' Cargo.toml)
           test "$(/usr/bin/game_optimizer --version)" = "game_optimizer $version"

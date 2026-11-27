@@ -59,7 +59,7 @@ Priority: optional
 Maintainer: Game Optimizer <cezar@cezar.com>
 Homepage: https://github.com/razectp/game-optimizer
 Installed-Size: $installed_size
-Depends: libc6 (>= $minimum_glibc), libgcc-s1, libegl1, libgl1, libxkbcommon0, libx11-6, libwayland-client0, systemd, pkexec, polkitd (>= 122), iproute2, iputils-ping, nftables (>= 1.0.9), procps
+Depends: libc6 (>= $minimum_glibc), libgcc-s1, libegl1, libgl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcursor1, libxi6, libxrandr2, libwayland-client0, systemd, pkexec, polkitd (>= 122), iproute2, iputils-ping, nftables (>= 1.0.9), procps
 Recommends: xdg-desktop-portal
 Description: Game performance optimizer and game-only WireGuard tunnel
  Detects native and Proton games, offers X11 macros, and isolates the

@@ -25,7 +25,7 @@ Em uma instalação Linux limpa (Ubuntu, Linux Mint ou Debian 64 bits), instale 
 curl -fsSL https://github.com/razectp/game-optimizer/releases/latest/download/install-linux.sh | bash
 ```
 
-Ou baixe o pacote `game-optimizer_0.6.6-1_amd64.deb` em [GitHub Releases](https://github.com/razectp/game-optimizer/releases) e instale com o instalador gráfico de pacotes ou via terminal (`bash install-linux.sh ./game-optimizer_0.6.6-1_amd64.deb`). O instalador solicita autorização de administrador (`sudo`) e resolve todas as dependências automaticamente pelo APT. Abra **Game Optimizer** pelo menu de aplicativos após a instalação.
+Ou baixe o pacote `game-optimizer_0.6.7-1_amd64.deb` em [GitHub Releases](https://github.com/razectp/game-optimizer/releases) e instale com o instalador gráfico de pacotes ou via terminal (`bash install-linux.sh ./game-optimizer_0.6.7-1_amd64.deb`). O instalador solicita autorização de administrador (`sudo`) e resolve todas as dependências automaticamente pelo APT. Abra **Game Optimizer** pelo menu de aplicativos após a instalação.
 
 O pacote autoriza o componente de rede pelo Polkit para membros do grupo
 `sudo` em sessões locais ativas. A interface e os macros rodam na conta que
@@ -91,13 +91,13 @@ de jogo em andamento pode precisar se reconectar.
 No Rust toolchain is required. Download a packaged build from
 [GitHub Releases](https://github.com/razectp/game-optimizer/releases):
 
-1. **Setup (recommended):** run `GameOptimizer-0.6.6-setup.exe`, approve the
+1. **Setup (recommended):** run `GameOptimizer-0.6.7-setup.exe`, approve the
    Windows administrator prompt, and follow the setup wizard (language, welcome,
    license, folder, shortcuts). The app and preferences remain in the current
    user's `%LOCALAPPDATA%`. If you enter credentials for a different Windows
    account, per-user settings and shortcuts may apply to that account instead. Over an
    existing install it shows an update page and asks to close the running app.
-2. **Portable:** extract `GameOptimizer-0.6.6-windows.zip` and install:
+2. **Portable:** extract `GameOptimizer-0.6.7-windows.zip` and install:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1

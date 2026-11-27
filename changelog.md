@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.7 — 2026-11-27
+
+- **Compatibilidade Linux (`glibc 2.39`) & dependências completas do `.deb`**:
+  - Compilação do pacote `.deb` no release fixada em `ubuntu-24.04` (`libc6 >= 2.39`), corrigindo o erro `Depends: libc6 (>= 2.43)` no Ubuntu 24.04 LTS e Linux Mint 22.x, mantendo compatibilidade direta com Ubuntu 25.x/26.04 e Debian 13+.
+  - Adicionadas as dependências X11 de runtime ao controle do pacote (`libxcursor1`, `libxi6`, `libxrandr2`, `libxkbcommon-x11-0`) para instalações limpas.
+  - Pipeline de release agora valida o limite `libc6 <= 2.39` e testa a instalaçõo limpa do mesmo `.deb` tanto em `ubuntu-24.04` quanto em `ubuntu-latest` (`ubuntu-26.04`) antes de publicar.
+
 ## 0.6.6 — 2026-11-27
 
 - **Suporte nativo para Linux (Ubuntu, Linux Mint e Debian)**:
